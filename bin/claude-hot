@@ -78,7 +78,11 @@ run_claude() {
   while true; do
     # Run claude with the given arguments
     set +e
-    claude "${claude_args[@]}"
+    if [[ ${#claude_args[@]} -eq 0 ]]; then
+      claude
+    else
+      claude "${claude_args[@]}"
+    fi
     local exit_code=$?
     set -e
 

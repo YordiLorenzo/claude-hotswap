@@ -42,11 +42,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOTSWAP_DIR="${HOME}/.claude/hotswap"
 
-echo -e "${BLUE}[1/5]${NC} Creating directories..."
+echo -e "${BLUE}[1/6]${NC} Creating directories..."
 mkdir -p "$HOTSWAP_DIR"
 
 # Copy files
-echo -e "${BLUE}[2/5]${NC} Installing CLI..."
+echo -e "${BLUE}[2/6]${NC} Installing CLI..."
 if [[ -f "${SCRIPT_DIR}/bin/claude-hotswap" ]]; then
   cp "${SCRIPT_DIR}/bin/claude-hotswap" "${HOTSWAP_DIR}/claude-hotswap"
 else
@@ -57,7 +57,16 @@ else
 fi
 chmod +x "${HOTSWAP_DIR}/claude-hotswap"
 
-echo -e "${BLUE}[3/5]${NC} Installing hook..."
+echo -e "${BLUE}[3/6]${NC} Installing wrapper..."
+if [[ -f "${SCRIPT_DIR}/bin/claude-hot" ]]; then
+  cp "${SCRIPT_DIR}/bin/claude-hot" "${HOTSWAP_DIR}/claude-hot"
+else
+  curl -fsSL "https://raw.githubusercontent.com/yordidekleijn/claude-hotswap/main/bin/claude-hot" \
+    -o "${HOTSWAP_DIR}/claude-hot"
+fi
+chmod +x "${HOTSWAP_DIR}/claude-hot"
+
+echo -e "${BLUE}[4/6]${NC} Installing hook..."
 if [[ -f "${SCRIPT_DIR}/hooks/limit-detector.sh" ]]; then
   cp "${SCRIPT_DIR}/hooks/limit-detector.sh" "${HOTSWAP_DIR}/limit-detector-hook.sh"
 else
@@ -67,27 +76,30 @@ fi
 chmod +x "${HOTSWAP_DIR}/limit-detector-hook.sh"
 
 # Symlink to PATH
-echo -e "${BLUE}[4/5]${NC} Adding to PATH..."
+echo -e "${BLUE}[5/6]${NC} Adding to PATH..."
 LINK_TARGET=""
 for dir in /usr/local/bin "${HOME}/.local/bin" "${HOME}/bin"; do
   if [[ -d "$dir" ]] && echo "$PATH" | tr ':' '\n' | grep -q "^${dir}$"; then
-    ln -sf "${HOTSWAP_DIR}/claude-hotswap" "${dir}/claude-hotswap" 2>/dev/null && LINK_TARGET="$dir" && break
+    ln -sf "${HOTSWAP_DIR}/claude-hotswap" "${dir}/claude-hotswap" 2>/dev/null \
+      && ln -sf "${HOTSWAP_DIR}/claude-hot" "${dir}/claude-hot" 2>/dev/null \
+      && LINK_TARGET="$dir" && break
   fi
 done
 
 if [[ -z "$LINK_TARGET" ]]; then
   mkdir -p "${HOME}/.local/bin"
   ln -sf "${HOTSWAP_DIR}/claude-hotswap" "${HOME}/.local/bin/claude-hotswap"
+  ln -sf "${HOTSWAP_DIR}/claude-hot" "${HOME}/.local/bin/claude-hot"
   LINK_TARGET="${HOME}/.local/bin"
-  echo -e "${YELLOW}  Symlinked to ${LINK_TARGET}/claude-hotswap${NC}"
+  echo -e "${YELLOW}  Symlinked to ${LINK_TARGET}/{claude-hotswap,claude-hot}${NC}"
   echo -e "${YELLOW}  Make sure ${LINK_TARGET} is in your PATH:${NC}"
   echo -e "    export PATH=\"${LINK_TARGET}:\$PATH\""
 else
-  echo -e "${GREEN}  Symlinked to ${LINK_TARGET}/claude-hotswap${NC}"
+  echo -e "${GREEN}  Symlinked to ${LINK_TARGET}/{claude-hotswap,claude-hot}${NC}"
 fi
 
 # Install hook into settings.json
-echo -e "${BLUE}[5/5]${NC} Configuring Stop hook..."
+echo -e "${BLUE}[6/6]${NC} Configuring Stop hook..."
 SETTINGS_FILE="${HOME}/.claude/settings.json"
 
 if [[ -f "$SETTINGS_FILE" ]]; then
@@ -131,8 +143,9 @@ echo ""
 echo -e "${GREEN}${BOLD}Installation complete!${NC}"
 echo ""
 echo -e "Quick start:"
+echo -e "  ${BOLD}claude-hot${NC}                           Use instead of 'claude' (auto-swap on limit)"
 echo -e "  ${BOLD}claude-hotswap status${NC}              Check current status"
 echo -e "  ${BOLD}claude-hotswap add work sk-ant-...${NC}  Add an API key"
-echo -e "  ${BOLD}claude-hotswap auto --resume${NC}        Auto-swap + resume on limit"
+echo -e "  ${BOLD}claude-hotswap auto --resume${NC}        Manual swap + resume"
 echo ""
 echo -e "For full docs: ${CYAN}https://github.com/yordidekleijn/claude-hotswap${NC}"

@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# claude-hot — Wrapper for claude that auto-swaps on rate limit and resumes.
+#
+# Instead of running `claude` directly, run `claude-hot`. When a rate limit
+# is hit and you Ctrl+C (or the session exits), it automatically:
+#   1. Detects the rate limit in the session transcript
+#   2. Swaps to the next available key/subscription
+#   3. Resumes the exact same session with the new credentials
+#
+# Usage:
+#   claude-hot                    Start a new session (auto-swap enabled)
+#   claude-hot --resume <id>      Resume a specific session (auto-swap enabled)
+#   claude-hot <any claude args>  Pass-through to claude with auto-swap
+#
+# Environment:
+#   CLAUDE_HOT_MAX_SWAPS   Max consecutive swaps before giving up (default: 5)
+#   CLAUDE_HOT_DELAY       Seconds to wait before resuming (default: 2)
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+DIM='\033[2m'
+
+HOTSWAP_DIR="${CLAUDE_HOTSWAP_DIR:-${HOME}/.claude/hotswap}"
+HOTSWAP_CMD="${HOTSWAP_DIR}/claude-hotswap"
+MAX_SWAPS="${CLAUDE_HOT_MAX_SWAPS:-5}"
+SWAP_DELAY="${CLAUDE_HOT_DELAY:-2}"
+
+swap_count=0
+
+# Ensure claude-hotswap is installed
+if [[ ! -x "$HOTSWAP_CMD" ]]; then
+  echo -e "${RED}Error: claude-hotswap not installed.${NC}"
+  echo "Install: https://github.com/yordidekleijn/claude-hotswap"
+  exit 1
+fi
+
+# Check if the most recent session was rate-limited
+check_rate_limit() {
+  local projects_dir="${HOME}/.claude/projects"
+
+  # Find most recent JSONL
+  local latest_jsonl
+  latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
+    -exec stat -f "%m %N" {} \; 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+
+  # GNU/Linux fallback
+  if [[ -z "$latest_jsonl" ]]; then
+    latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
+      -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+  fi
+
+  if [[ -z "$latest_jsonl" || ! -f "$latest_jsonl" ]]; then
+    return 1
+  fi
+
+  # Check last 20 lines for rate limit
+  if tail -20 "$latest_jsonl" | grep -q '"error":"rate_limit"' 2>/dev/null; then
+    # Return the session ID (filename without .jsonl)
+    basename "$latest_jsonl" .jsonl
+    return 0
+  fi
+
+  return 1
+}
+
+# Main loop
+run_claude() {
+  local claude_args=("$@")
+  local session_id=""
+
+  while true; do
+    # Run claude with the given arguments
+    set +e
+    claude "${claude_args[@]}"
+    local exit_code=$?
+    set -e
+
+    # Check if the session was rate-limited
+    local limited_session
+    limited_session=$(check_rate_limit) || true
+
+    if [[ -z "$limited_session" ]]; then
+      # Clean exit — no rate limit
+      exit $exit_code
+    fi
+
+    # Rate limit detected!
+    swap_count=$((swap_count + 1))
+
+    if [[ $swap_count -gt $MAX_SWAPS ]]; then
+      echo ""
+      echo -e "${RED}${BOLD}Reached max swap attempts (${MAX_SWAPS}).${NC}"
+      echo -e "${YELLOW}All available keys may be exhausted. Wait for limits to reset.${NC}"
+      echo -e "  claude-hotswap status"
+      echo -e "  claude-hotswap reset  (after limits reset)"
+      exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Claude Hotswap — Auto Recovery${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  Rate limit detected on session: ${CYAN}${limited_session}${NC}"
+    echo -e "  Swap attempt: ${swap_count}/${MAX_SWAPS}"
+    echo ""
+
+    # Run auto-swap (without --resume, we handle resume ourselves)
+    echo -e "${DIM}  Running: claude-hotswap auto${NC}"
+    echo ""
+
+    set +e
+    "$HOTSWAP_CMD" auto 2>&1
+    local swap_exit=$?
+    set -e
+
+    if [[ $swap_exit -ne 0 ]]; then
+      echo ""
+      echo -e "${RED}Swap failed. No available backup keys.${NC}"
+      echo -e "  claude-hotswap list"
+      exit 1
+    fi
+
+    # Source the new environment
+    if [[ -f "${HOTSWAP_DIR}/active-env.sh" ]]; then
+      source "${HOTSWAP_DIR}/active-env.sh"
+    fi
+
+    echo ""
+    echo -e "${GREEN}Resuming session ${CYAN}${limited_session}${GREEN} in ${SWAP_DELAY}s...${NC}"
+    echo -e "${DIM}  Press Ctrl+C now to cancel auto-resume.${NC}"
+    sleep "$SWAP_DELAY"
+
+    # Set up args for resume
+    claude_args=("--resume" "$limited_session")
+
+    echo -e "${GREEN}${BOLD}Resuming...${NC}"
+    echo ""
+  done
+}
+
+# Pass all arguments through to claude
+run_claude "$@"

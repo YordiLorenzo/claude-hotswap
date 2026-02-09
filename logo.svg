@@ -1,1 +1,75 @@
-<svg fill="none" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><linearGradient id="a" gradientUnits="userSpaceOnUse" x1="0" x2="512" y1="0" y2="512"><stop offset="0" stop-color="#0f0f12"/><stop offset="1" stop-color="#1a1a24"/></linearGradient><linearGradient id="b" gradientUnits="userSpaceOnUse" x1="100" x2="412" y1="100" y2="412"><stop offset="0" stop-color="#d97706"/><stop offset=".5" stop-color="#f59e0b"/><stop offset="1" stop-color="#fbbf24"/></linearGradient><linearGradient id="c" gradientUnits="userSpaceOnUse" x1="412" x2="100" y1="100" y2="412"><stop offset="0" stop-color="#7c3aed"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#a78bfa"/></linearGradient><linearGradient id="d" gradientUnits="userSpaceOnUse" x1="220" x2="292" y1="140" y2="372"><stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#f59e0b"/></linearGradient><filter id="e" height="200%" width="200%" x="-50%" y="-50%"><feGaussianBlur result="blur" stdDeviation="8"/><feComposite in="SourceGraphic" in2="blur" operator="over"/></filter><filter id="f" height="200%" width="200%" x="-50%" y="-50%"><feGaussianBlur result="blur" stdDeviation="12"/><feComposite in="SourceGraphic" in2="blur" operator="over"/></filter><rect fill="url(#a)" height="512" rx="80" width="512"/><g opacity=".03" stroke="#fff"><path d="m0 128h512"/><path d="m0 256h512"/><path d="m0 384h512"/><path d="m128 0v512"/><path d="m256 0v512"/><path d="m384 0v512"/></g><g filter="url(#e)"><path d="m362 108a150 150 0 0 1 42 148" fill="none" opacity=".7" stroke="url(#b)" stroke-linecap="round" stroke-width="6"/><path d="m396 250 16 12-8-18z" fill="#f59e0b" opacity=".8"/></g><g filter="url(#e)"><path d="m150 404a150 150 0 0 1 -42-148" fill="none" opacity=".7" stroke="url(#c)" stroke-linecap="round" stroke-width="6"/><path d="m116 262-16-12 8 18z" fill="#8b5cf6" opacity=".8"/></g><circle cx="256" cy="256" fill="none" opacity=".5" r="110" stroke="#27272a" stroke-width="2"/><g filter="url(#f)"><path d="m274 160-32 88h28l-32 104 58-120h-32z" fill="url(#d)" opacity=".95"/></g><circle cx="218" cy="196" fill="#fbbf24" opacity=".6" r="2.5"/><circle cx="302" cy="308" fill="#fbbf24" opacity=".5" r="2"/><circle cx="196" cy="280" fill="#a78bfa" opacity=".5" r="1.5"/><circle cx="320" cy="220" fill="#a78bfa" opacity=".4" r="2"/><circle cx="230" cy="340" fill="#fcd34d" opacity=".4" r="1.5"/><circle cx="290" cy="170" fill="#fcd34d" opacity=".5" r="2"/><text style="text-anchor:middle;font-family:system-ui, -apple-system, sans-serif;font-size:28;font-weight:800;letter-spacing:12;fill:#fff;opacity:.12" x="256" y="440">HOTSWAP</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0c0c10"/>
+      <stop offset="100%" stop-color="#16161e"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="bolt-grad" x1="240" y1="120" x2="280" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FDE68A"/>
+      <stop offset="40%" stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="arrow-left" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="arrow-right" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+    <filter id="bolt-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feFlood flood-color="#FBBF24" flood-opacity="0.4"/>
+      <feComposite in2="blur" operator="in" result="glow"/>
+      <feComposite in="SourceGraphic" in2="glow" operator="over"/>
+    </filter>
+    <filter id="arrow-glow-l" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#8B5CF6" flood-opacity="0.35"/>
+      <feComposite in2="blur" operator="in" result="glow"/>
+      <feComposite in="SourceGraphic" in2="glow" operator="over"/>
+    </filter>
+    <filter id="arrow-glow-r" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#F59E0B" flood-opacity="0.35"/>
+      <feComposite in2="blur" operator="in" result="glow"/>
+      <feComposite in="SourceGraphic" in2="glow" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+
+  <!-- Subtle radial highlight -->
+  <circle cx="256" cy="240" r="200" fill="#FBBF24" opacity="0.02"/>
+
+  <!-- LEFT ARROW (purple, pointing left) -->
+  <g filter="url(#arrow-glow-l)">
+    <!-- Arrow shaft -->
+    <rect x="80" y="196" width="140" height="16" rx="8" fill="url(#arrow-left)" opacity="0.9"/>
+    <!-- Arrow head -->
+    <polygon points="80,172 80,236 36,204" fill="#8B5CF6" opacity="0.9"/>
+  </g>
+
+  <!-- RIGHT ARROW (amber, pointing right) -->
+  <g filter="url(#arrow-glow-r)">
+    <!-- Arrow shaft -->
+    <rect x="292" y="300" width="140" height="16" rx="8" fill="url(#arrow-right)" opacity="0.9"/>
+    <!-- Arrow head -->
+    <polygon points="432,276 432,340 476,308" fill="#F59E0B" opacity="0.9"/>
+  </g>
+
+  <!-- Center lightning bolt -->
+  <g filter="url(#bolt-glow)">
+    <path d="M 290 108 L 232 244 L 268 244 L 222 404 L 310 220 L 270 220 Z"
+          fill="url(#bolt-grad)"/>
+  </g>
+
+  <!-- Bolt edge highlight -->
+  <path d="M 290 108 L 232 244 L 268 244 L 222 404 L 310 220 L 270 220 Z"
+        fill="none" stroke="#FDE68A" stroke-width="1" opacity="0.3"/>
+</svg>

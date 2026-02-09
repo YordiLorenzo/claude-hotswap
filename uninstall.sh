@@ -14,10 +14,12 @@ echo ""
 
 # Remove symlinks
 for dir in /usr/local/bin "${HOME}/.local/bin" "${HOME}/bin"; do
-  if [[ -L "${dir}/claude-hotswap" ]]; then
-    rm -f "${dir}/claude-hotswap"
-    echo -e "${GREEN}Removed symlink: ${dir}/claude-hotswap${NC}"
-  fi
+  for cmd in claude-hotswap claude-hot; do
+    if [[ -L "${dir}/${cmd}" ]]; then
+      rm -f "${dir}/${cmd}"
+      echo -e "${GREEN}Removed symlink: ${dir}/${cmd}${NC}"
+    fi
+  done
 done
 
 # Remove Stop hook from settings.json

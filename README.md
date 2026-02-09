@@ -18,19 +18,22 @@
 ---
 
 ```
-$ claude-hotswap auto --resume
+$ claude-hot
 
-Claude Hotswap — Auto Mode
+  Working on your project...
+  [rate limit hit — session frozen]
 
-Rate limit detected!
-  Session: 196557c7-2189-4c1c-9c85-23356ed6323c
-  Working dir: /Users/you/projects/my-app
-  Resets at: 4pm
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Claude Hotswap — Auto Recovery
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Attempting swap...
+  Rate limit detected on session: 196557c7-2189-4c1c-9c85-23356ed6323c
+  Swap attempt: 1/5
+
 Swapped: primary -> work [Subscription: ~/.claude/hotswap/configs/work]
 
-Sourcing env and resuming session...
+Resuming session 196557c7-2189-4c1c-9c85-23356ed6323c in 2s...
+Resuming...
 ```
 
 ## The Problem
@@ -41,10 +44,11 @@ Claude Code (Pro/Max) has usage limits that reset on a timer. When you hit the l
 
 **claude-hotswap** gives you:
 
-1. **Automatic detection** — A Claude Code [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) monitors your session transcript for rate limit errors
-2. **Key rotation** — Round-robin between multiple API keys or subscriptions
-3. **Session resume** — Swap keys and resume your exact session with `claude --resume`
-4. **Secure storage** — API keys stored in macOS Keychain (or encrypted files on Linux)
+1. **`claude-hot` wrapper** — Drop-in replacement for `claude` that automatically detects rate limits, swaps keys, and resumes your session in a loop
+2. **Automatic detection** — A Claude Code [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) monitors your session transcript for rate limit errors
+3. **Key rotation** — Round-robin between multiple API keys or subscriptions
+4. **Session resume** — Swap keys and resume your exact session with `claude --resume`
+5. **Secure storage** — API keys stored in macOS Keychain (or encrypted files on Linux)
 
 ## Install
 
@@ -65,14 +69,16 @@ cd claude-hotswap
 ### Manual install
 
 ```bash
-# Copy the CLI
+# Copy the CLI and wrapper
 mkdir -p ~/.claude/hotswap
 cp bin/claude-hotswap ~/.claude/hotswap/claude-hotswap
+cp bin/claude-hot ~/.claude/hotswap/claude-hot
 cp hooks/limit-detector.sh ~/.claude/hotswap/limit-detector-hook.sh
-chmod +x ~/.claude/hotswap/claude-hotswap ~/.claude/hotswap/limit-detector-hook.sh
+chmod +x ~/.claude/hotswap/claude-hotswap ~/.claude/hotswap/claude-hot ~/.claude/hotswap/limit-detector-hook.sh
 
 # Add to PATH
 ln -sf ~/.claude/hotswap/claude-hotswap /usr/local/bin/claude-hotswap
+ln -sf ~/.claude/hotswap/claude-hot /usr/local/bin/claude-hot
 
 # Add the Stop hook to ~/.claude/settings.json
 # (see Hook Configuration below)
@@ -98,31 +104,44 @@ claude-hotswap add work sk-ant-api03-xxxxx "Work API key"
 claude-hotswap add-sub personal ~/.claude/hotswap/configs/personal "Personal account"
 ```
 
-### 2. When you hit a limit
+### 2. Use `claude-hot` instead of `claude`
 
-One command does everything — detects the limit, swaps to the next available key, and resumes your session:
+The easiest way — just use `claude-hot` as a drop-in replacement for `claude`:
 
 ```bash
-claude-hotswap auto --resume
+claude-hot                        # Start a new session (auto-swap enabled)
+claude-hot --resume <session-id>  # Resume a session (auto-swap enabled)
+claude-hot -p "fix the tests"     # Any claude args work
 ```
 
-Or step by step:
+When you hit a rate limit, `claude-hot` automatically:
+1. Detects the limit in the transcript
+2. Swaps to the next available key
+3. Resumes the same session with the new credentials
+4. Repeats up to 5 times (configurable via `CLAUDE_HOT_MAX_SWAPS`)
+
+### 3. Manual mode (alternative)
+
+If you prefer manual control:
 
 ```bash
-claude-hotswap auto           # Detect + swap (shows resume command)
-claude-hotswap resume         # Resume the rate-limited session
+claude-hotswap auto --resume      # Detect + swap + resume in one shot
+# or step by step:
+claude-hotswap auto               # Detect + swap (shows resume command)
+claude-hotswap resume             # Resume the rate-limited session
 ```
 
-### 3. After the limit resets
+### 4. After the limit resets
 
 ```bash
-claude-hotswap reset          # Mark all keys as available again
+claude-hotswap reset              # Mark all keys as available again
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `claude-hot [args]` | Drop-in `claude` wrapper with auto-swap on rate limit |
 | `claude-hotswap status` | Show all keys and current session health |
 | `claude-hotswap list` | List configured keys with status |
 | `claude-hotswap add <name> <key> [note]` | Add an API key (stored in Keychain) |
@@ -138,6 +157,31 @@ claude-hotswap reset          # Mark all keys as available again
 | `claude-hotswap help` | Show help |
 
 ## How It Works
+
+### The `claude-hot` Wrapper
+
+`claude-hot` is the recommended way to use claude-hotswap. It wraps the `claude` command and monitors session exits:
+
+```
+claude-hot
+    │
+    ├─► runs `claude` with your args
+    │
+    ├─► claude exits (you Ctrl+C after rate limit message)
+    │
+    ├─► checks last session transcript for rate_limit error
+    │     │
+    │     ├─► no rate limit → exits normally
+    │     └─► rate limit found ─►
+    │           │
+    │           ├─► runs `claude-hotswap auto` (swap to next key)
+    │           ├─► sources new credentials
+    │           └─► runs `claude --resume <session-id>`
+    │                 │
+    │                 └─► loops back (up to MAX_SWAPS times)
+    │
+    └─► all keys exhausted → exits with status
+```
 
 ### Rate Limit Detection
 
@@ -169,7 +213,7 @@ The **Stop hook** (`hooks/limit-detector.sh`) fires every time Claude finishes r
 
 ### Session Resume
 
-When `auto` detects a limit, it captures the **session ID** from the JSONL filename. After swapping keys, `claude --resume <session-id>` picks up exactly where you left off — same conversation history, same context.
+When a rate limit is detected, the **session ID** is extracted from the JSONL filename. After swapping keys, `claude --resume <session-id>` picks up exactly where you left off — same conversation history, same context.
 
 ## Setting Up Multiple Subscriptions
 
@@ -199,7 +243,17 @@ Claude Hotswap Keys (2 configured)
 Last swap: never
 ```
 
-## Hook Configuration
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_HOT_MAX_SWAPS` | `5` | Max consecutive swaps before giving up |
+| `CLAUDE_HOT_DELAY` | `2` | Seconds to wait before auto-resuming |
+| `CLAUDE_HOTSWAP_DIR` | `~/.claude/hotswap` | Data directory |
+
+### Hook Configuration
 
 The installer automatically adds this to `~/.claude/settings.json`:
 
@@ -236,14 +290,14 @@ The Stop hook fires every time Claude finishes a response. It runs in under 100m
 ```bash
 ./uninstall.sh
 # or manually:
-rm -f /usr/local/bin/claude-hotswap
+rm -f /usr/local/bin/claude-hotswap /usr/local/bin/claude-hot
 rm -rf ~/.claude/hotswap
 # Remove the Stop hook from ~/.claude/settings.json
 ```
 
 ## Limitations
 
-- **Cannot swap mid-session** — Claude Code's hooks can't change the active API key during a running session. The swap happens between sessions, and you resume with `claude --resume`.
+- **Cannot swap mid-session** — Claude Code's hooks can't change the active API key during a running session. The swap happens when the session exits (Ctrl+C after limit). `claude-hot` automates this entire flow.
 - **Subscription isolation** — Each `CLAUDE_CONFIG_DIR` is fully independent. Settings, hooks, and permissions from your main config aren't shared.
 - **macOS-focused** — Uses macOS Keychain for secure storage. Linux uses encrypted files as a fallback.
 

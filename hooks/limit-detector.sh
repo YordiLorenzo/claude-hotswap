@@ -94,29 +94,21 @@ if [[ -f "$KEYS_FILE" ]]; then
       | .[0].value.name // empty' "$KEYS_FILE")
 
     if [[ -n "$NEXT_NAME" ]]; then
-      cat <<EOF
-{
-  "systemMessage": "RATE LIMIT HIT on key '${CURRENT_NAME}'. ${AVAILABLE} backup key(s) available. Run: claude-hotswap auto --resume  to swap to '${NEXT_NAME}' and resume this session. Or: claude-hotswap auto (swap only) then claude-hotswap resume. Resets at: ${RESET_TIME:-unknown}"
-}
-EOF
+      jq -n --arg name "$CURRENT_NAME" --arg next "$NEXT_NAME" \
+        --arg avail "$AVAILABLE" --arg resets "${RESET_TIME:-unknown}" \
+        '{systemMessage: "RATE LIMIT HIT on key '"'"'\($name)'"'"'. \($avail) backup key(s) available. Run: claude-hotswap auto --resume  to swap to '"'"'\($next)'"'"' and resume this session. Or: claude-hotswap auto (swap only) then claude-hotswap resume. Resets at: \($resets)"}'
       log "Suggested swap to '${NEXT_NAME}'"
       exit 0
     fi
   else
-    cat <<EOF
-{
-  "systemMessage": "RATE LIMIT HIT on '${CURRENT_NAME}'. No backup keys available! All ${KEY_COUNT} keys exhausted. Earliest reset: ${RESET_TIME:-unknown}. Add more keys with: claude-hotswap add <name> <api-key>"
-}
-EOF
+    jq -n --arg name "$CURRENT_NAME" --arg count "$KEY_COUNT" \
+      --arg resets "${RESET_TIME:-unknown}" \
+      '{systemMessage: "RATE LIMIT HIT on '"'"'\($name)'"'"'. No backup keys available! All \($count) keys exhausted. Earliest reset: \($resets). Add more keys with: claude-hotswap add <name> <api-key>"}'
     log "All keys exhausted!"
     exit 0
   fi
 fi
 
 # Fallback: just warn
-cat <<EOF
-{
-  "systemMessage": "Rate limit detected. Run 'claude-hotswap auto' to swap to a backup key."
-}
-EOF
+echo '{"systemMessage": "Rate limit detected. Run '\''claude-hotswap auto'\'' to swap to a backup key."}'
 exit 0

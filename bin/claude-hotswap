@@ -107,7 +107,7 @@ acquire_lock() {
   local attempts=0
   while [[ -f "$LOCK_FILE" ]] && [[ $attempts -lt 10 ]]; do
     sleep 0.1
-    ((attempts++))
+    attempts=$((attempts + 1))
   done
   echo $$ > "$LOCK_FILE"
 }
@@ -536,18 +536,18 @@ cmd_auto() {
       write_keys "$data"
     fi
 
-    echo ""
-    echo -e "Attempting swap..."
-    cmd_swap
-
-    echo ""
-
-    # Save session resume info
+    # Save session resume info BEFORE swap (swap may exit on failure)
     if [[ -n "$session_id" ]]; then
       jq --arg sid "$session_id" --arg cwd "${session_cwd:-}" \
         '.lastLimitedSession = {id: $sid, cwd: $cwd}' "$KEYS_FILE" > "${KEYS_FILE}.tmp" \
         && mv "${KEYS_FILE}.tmp" "$KEYS_FILE"
     fi
+
+    echo ""
+    echo -e "Attempting swap..."
+    cmd_swap
+
+    echo ""
 
     # Offer to resume the session
     if [[ -n "$session_id" ]]; then

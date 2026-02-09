@@ -814,6 +814,169 @@ assert_eq "unknown command exits non-zero" "1" "$bad_exit"
 echo ""
 
 # ─────────────────────────────────────────────────────
+# TEST 26: Lock contention (((attempts++)) bug)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 26: Lock File Contention${NC}"
+
+# Create a stale lock file — this would crash with ((attempts++)) under set -e
+echo "99999" > "${MOCK_HOTSWAP}/.lock"
+
+# Reset and re-add a key (both use acquire_lock)
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+set +e
+output=$("$HOTSWAP" reset 2>&1)
+lock_exit=$?
+set -e
+assert_eq "reset works despite stale lock" "0" "$lock_exit"
+assert_contains "reset succeeds with lock" "All keys reset" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 27: Session info saved before swap failure
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 27: Session Info Saved Before Swap Failure${NC}"
+
+# Set up: only 1 key (primary), already exhausted → swap will fail
+jq '.keys = [.keys[0]] | .current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+# Clear any previous session info
+jq 'del(.lastLimitedSession)' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Create a rate-limited JSONL
+FAIL_SESSION="bbbbbbbb-1111-2222-3333-444444444444"
+sleep 1
+cat > "${MOCK_PROJECTS}/${FAIL_SESSION}.jsonl" <<'JSONL'
+{"type":"system","cwd":"/tmp/failtest","sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}
+{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"model":"<synthetic>","message":{"content":[{"type":"text","text":"You've hit your limit · resets 9pm"}]}}
+JSONL
+
+# Auto should detect limit, save session info, then fail on swap
+set +e
+output=$("$HOTSWAP" auto 2>&1)
+auto_exit=$?
+set -e
+
+# Even though swap failed, session ID should be saved for later resume
+saved=$(jq -r '.lastLimitedSession.id // empty' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "session ID saved despite swap failure" "$FAIL_SESSION" "$saved"
+saved_cwd=$(jq -r '.lastLimitedSession.cwd // empty' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "session cwd saved despite swap failure" "/tmp/failtest" "$saved_cwd"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 28: Stale rate limit not detected after resume
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 28: Stale Rate Limit Ignored After Resume${NC}"
+
+# Reset keys for this test
+"$HOTSWAP" reset &>/dev/null
+MOCK_SUB3="${TEST_DIR}/configs/backup"
+mkdir -p "$MOCK_SUB3"
+"$HOTSWAP" add-sub backup "$MOCK_SUB3" "Backup" &>/dev/null
+
+# Simulate: session hit rate limit, then was resumed and had 10+ more messages
+STALE_SESSION="dddddddd-1111-2222-3333-444444444444"
+sleep 1
+{
+  echo '{"type":"system","cwd":"/tmp","sessionId":"dddddddd-1111-2222-3333-444444444444"}'
+  echo '{"type":"human","message":{"content":[{"type":"text","text":"do stuff"}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working..."}]},"model":"claude-opus-4-20250514"}'
+  echo '{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"model":"<synthetic>","message":{"content":[{"type":"text","text":"You'\''ve hit your limit · resets 3pm"}]}}'
+  # After resume — 10 new messages push the rate limit out of tail -5
+  for j in $(seq 1 10); do
+    echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Resumed line $j\"}]},\"model\":\"claude-opus-4-20250514\"}"
+  done
+} > "${MOCK_PROJECTS}/${STALE_SESSION}.jsonl"
+
+# claude-hot's check_rate_limit should NOT detect this as rate-limited
+# (rate limit is line 4, but there are 10 lines after it)
+set +e
+limited=$(
+  # Inline the check_rate_limit logic from claude-hot
+  latest="${MOCK_PROJECTS}/${STALE_SESSION}.jsonl"
+  if tail -5 "$latest" | grep -q '"error":"rate_limit"' 2>/dev/null; then
+    echo "STALE_DETECTED"
+  else
+    echo "CLEAN"
+  fi
+)
+set -e
+
+assert_eq "stale rate limit not detected (tail -5)" "CLEAN" "$limited"
+
+# But if the rate limit IS at the end (fresh), it should detect
+FRESH_SESSION="eeeeeeee-1111-2222-3333-444444444444"
+sleep 1
+{
+  echo '{"type":"system","cwd":"/tmp","sessionId":"eeeeeeee-1111-2222-3333-444444444444"}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working..."}]},"model":"claude-opus-4-20250514"}'
+  echo '{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"model":"<synthetic>","message":{"content":[{"type":"text","text":"You'\''ve hit your limit · resets 5pm"}]}}'
+} > "${MOCK_PROJECTS}/${FRESH_SESSION}.jsonl"
+
+set +e
+limited=$(
+  latest="${MOCK_PROJECTS}/${FRESH_SESSION}.jsonl"
+  if tail -5 "$latest" | grep -q '"error":"rate_limit"' 2>/dev/null; then
+    echo "DETECTED"
+  else
+    echo "CLEAN"
+  fi
+)
+set -e
+
+assert_eq "fresh rate limit detected (tail -5)" "DETECTED" "$limited"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 29: Hook JSON output is valid
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 29: Hook JSON Output Validity${NC}"
+
+# Reset for hook test
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Use the existing rate-limited JSONL
+FRESH_SESSION_JSONL="${MOCK_PROJECTS}/${FRESH_SESSION}.jsonl"
+hook_input='{"transcript_path":"'"$FRESH_SESSION_JSONL"'","session_id":"eeeeeeee","stop_hook_active":false}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+# Verify the output is valid JSON
+test_count=$((test_count + 1))
+if echo "$output" | jq . &>/dev/null; then
+  echo -e "  ${GREEN}PASS${NC} hook output is valid JSON"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} hook output is not valid JSON"
+  echo -e "    output: ${output}"
+  fail_count=$((fail_count + 1))
+fi
+
+# Verify systemMessage key exists
+test_count=$((test_count + 1))
+if echo "$output" | jq -e '.systemMessage' &>/dev/null; then
+  echo -e "  ${GREEN}PASS${NC} hook output has systemMessage key"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} hook output missing systemMessage key"
+  fail_count=$((fail_count + 1))
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────
 

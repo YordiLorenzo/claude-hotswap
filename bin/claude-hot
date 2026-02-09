@@ -60,8 +60,11 @@ check_rate_limit() {
     return 1
   fi
 
-  # Check last 20 lines for rate limit
-  if tail -20 "$latest_jsonl" | grep -q '"error":"rate_limit"' 2>/dev/null; then
+  # Check last 5 lines for rate limit. We use a small window (not 20)
+  # because after a successful --resume, the old rate limit error is still
+  # in the JSONL but buried under new messages. Only trigger if the rate
+  # limit is at the very end of the file (i.e., it just happened).
+  if tail -5 "$latest_jsonl" | grep -q '"error":"rate_limit"' 2>/dev/null; then
     # Return the session ID (filename without .jsonl)
     basename "$latest_jsonl" .jsonl
     return 0

@@ -1,6 +1,21 @@
-# claude-hotswap
+<p align="center">
+  <img src="logo.svg" alt="claude-hotswap" width="180" />
+</p>
 
-Automatically detect Claude Code rate limits and swap to backup API keys or subscriptions — then resume your session exactly where you left off.
+<h1 align="center">claude-hotswap</h1>
+
+<p align="center">
+  Automatically detect Claude Code rate limits and swap to backup API keys or subscriptions — then resume your session exactly where you left off.
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> &middot;
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#commands">Commands</a> &middot;
+  <a href="#how-it-works">How It Works</a>
+</p>
+
+---
 
 ```
 $ claude-hotswap auto --resume

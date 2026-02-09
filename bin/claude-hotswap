@@ -429,12 +429,12 @@ cmd_detect() {
   # Find most recent JSONL (macOS stat format; falls back to GNU stat)
   local latest_jsonl
   latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
-    -exec stat -f "%m %N" {} \; 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    -exec stat -f "%m %N" {} \; 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
 
   # GNU/Linux fallback
   if [[ -z "$latest_jsonl" ]]; then
     latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
-      -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+      -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
   fi
 
   if [[ -z "$latest_jsonl" ]]; then

@@ -542,6 +542,278 @@ assert_contains "claude-hot: swap failed or hit max" "No available keys\|max swa
 echo ""
 
 # ─────────────────────────────────────────────────────
+# TEST 16: Stop Hook (limit-detector.sh)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 16: Stop Hook — Rate Limit Detection${NC}"
+
+# Reset keys for hook test
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Create a rate-limited session for the hook to find
+HOOK_SESSION="ffffffff-1111-2222-3333-444444444444"
+HOOK_JSONL="${MOCK_PROJECTS}/${HOOK_SESSION}.jsonl"
+sleep 1
+cat > "$HOOK_JSONL" <<'JSONL'
+{"type":"system","cwd":"/Users/test/hook-test","sessionId":"ffffffff-1111-2222-3333-444444444444"}
+{"type":"human","message":{"content":[{"type":"text","text":"do stuff"}]}}
+{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"model":"<synthetic>","message":{"content":[{"type":"text","text":"You've hit your usage limit · resets 5pm (Asia/Dubai)"}]}}
+JSONL
+
+HOOK_SCRIPT="${REPO_DIR}/hooks/limit-detector.sh"
+
+# Feed hook input via stdin (simulating what Claude Code sends)
+hook_input='{"transcript_path":"'"$HOOK_JSONL"'","session_id":"'"$HOOK_SESSION"'","stop_hook_active":false}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+assert_contains "hook outputs systemMessage" "systemMessage" "$output"
+assert_contains "hook mentions RATE LIMIT" "RATE LIMIT" "$output"
+assert_contains "hook suggests swap command" "claude-hotswap" "$output"
+assert_contains "hook mentions backup key" "work" "$output"
+
+# Verify hook marked primary as exhausted
+exhausted=$(jq -r '.keys[0].exhausted' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "hook marked primary exhausted" "true" "$exhausted"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 17: Stop Hook — Re-entry Prevention
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 17: Stop Hook — Re-entry Prevention (stop_hook_active)${NC}"
+
+# Reset
+"$HOTSWAP" reset &>/dev/null
+
+# Send with stop_hook_active=true — hook should exit silently
+hook_input='{"transcript_path":"'"$HOOK_JSONL"'","session_id":"'"$HOOK_SESSION"'","stop_hook_active":true}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+# Should produce NO output (silent exit)
+test_count=$((test_count + 1))
+if [[ -z "$output" ]]; then
+  echo -e "  ${GREEN}PASS${NC} hook exits silently on stop_hook_active=true"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} hook should exit silently on stop_hook_active=true"
+  echo -e "    got: ${output}"
+  fail_count=$((fail_count + 1))
+fi
+
+# Verify keys were NOT modified (still available after reset)
+exhausted=$(jq -r '.keys[0].exhausted' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "hook did not modify keys on re-entry" "false" "$exhausted"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 18: Stop Hook — Clean Session (no rate limit)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 18: Stop Hook — Clean Session${NC}"
+
+CLEAN_HOOK_JSONL="${MOCK_PROJECTS}/99999999-aaaa-bbbb-cccc-dddddddddddd.jsonl"
+sleep 1
+cat > "$CLEAN_HOOK_JSONL" <<'JSONL'
+{"type":"system","cwd":"/tmp","sessionId":"99999999-aaaa-bbbb-cccc-dddddddddddd"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"All done!"}]},"model":"claude-opus-4-20250514"}
+JSONL
+
+hook_input='{"transcript_path":"'"$CLEAN_HOOK_JSONL"'","session_id":"99999999-aaaa-bbbb-cccc-dddddddddddd","stop_hook_active":false}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+test_count=$((test_count + 1))
+if [[ -z "$output" ]]; then
+  echo -e "  ${GREEN}PASS${NC} hook produces no output for clean session"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} hook should produce no output for clean session"
+  echo -e "    got: ${output}"
+  fail_count=$((fail_count + 1))
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 19: Stop Hook — All Keys Exhausted
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 19: Stop Hook — All Keys Exhausted${NC}"
+
+# Exhaust all keys manually
+"$HOTSWAP" reset &>/dev/null
+local_data=$(cat "${MOCK_HOTSWAP}/keys.json")
+echo "$local_data" | jq '.keys |= map(.exhausted = true)' > "${MOCK_HOTSWAP}/keys.json"
+
+hook_input='{"transcript_path":"'"$HOOK_JSONL"'","session_id":"'"$HOOK_SESSION"'","stop_hook_active":false}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+assert_contains "hook warns all exhausted" "No backup keys available" "$output"
+
+# Reset after test
+"$HOTSWAP" reset &>/dev/null
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 20: Subscription Swap (CLAUDE_CONFIG_DIR)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 20: Subscription Swap${NC}"
+
+# Reset and set up for sub swap
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Re-add a subscription (personal was removed in test 10)
+MOCK_SUB2="${TEST_DIR}/configs/team"
+mkdir -p "$MOCK_SUB2"
+"$HOTSWAP" add-sub team "$MOCK_SUB2" "Team subscription" &>/dev/null
+
+# Remove the work key so next swap goes to the subscription
+"$HOTSWAP" remove work &>/dev/null
+
+# Swap from primary → team (subscription)
+output=$("$HOTSWAP" swap 2>&1) || true
+assert_contains "swapped to team subscription" "team" "$output"
+
+# Check active-env.sh sets CLAUDE_CONFIG_DIR
+if [[ -f "${MOCK_HOTSWAP}/active-env.sh" ]]; then
+  env_content=$(cat "${MOCK_HOTSWAP}/active-env.sh")
+  assert_contains "active-env.sh sets CLAUDE_CONFIG_DIR" "CLAUDE_CONFIG_DIR" "$env_content"
+  assert_contains "active-env.sh points to team config" "$MOCK_SUB2" "$env_content"
+  assert_contains "active-env.sh unsets ANTHROPIC_API_KEY" "unset ANTHROPIC_API_KEY" "$env_content"
+else
+  test_count=$((test_count + 3))
+  echo -e "  ${RED}FAIL${NC} active-env.sh not created for subscription swap"
+  fail_count=$((fail_count + 3))
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 21: Resume Command
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 21: Resume Command${NC}"
+
+# Set up a lastLimitedSession
+jq --arg sid "abababab-cdcd-efef-0101-232323232323" \
+   '.lastLimitedSession = {id: $sid, cwd: "/tmp"}' \
+   "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Mock claude that logs its args
+echo "0" > "$MOCK_STATE"
+cat > "${MOCK_BIN}/claude" <<MOCK
+#!/usr/bin/env bash
+echo "RESUME_ARGS: \$*"
+exit 0
+MOCK
+chmod +x "${MOCK_BIN}/claude"
+
+output=$("$HOTSWAP" resume 2>&1) || true
+assert_contains "resume shows session ID" "abababab-cdcd-efef-0101-232323232323" "$output"
+assert_contains "resume passes --resume flag" "RESUME_ARGS: --resume abababab" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 22: Resume with no saved session
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 22: Resume — No Saved Session${NC}"
+
+# Clear lastLimitedSession
+jq 'del(.lastLimitedSession)' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+set +e
+output=$("$HOTSWAP" resume 2>&1)
+resume_exit=$?
+set -e
+assert_contains "resume fails without saved session" "No rate-limited session" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 23: claude-hot with arguments
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 23: claude-hot Passes Arguments${NC}"
+
+# Reset keys
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+echo "0" > "$MOCK_STATE"
+
+# Mock claude that logs args and writes a clean session
+cat > "${MOCK_BIN}/claude" <<MOCK
+#!/usr/bin/env bash
+echo "ARGS_RECEIVED: \$*"
+SESSION="77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+sleep 1
+cat > "${MOCK_PROJECTS}/\${SESSION}.jsonl" <<'JSONL'
+{"type":"system","cwd":"/tmp","sessionId":"77777777-8888-9999-aaaa-bbbbbbbbbbbb"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]},"model":"claude-opus-4-20250514"}
+JSONL
+exit 0
+MOCK
+chmod +x "${MOCK_BIN}/claude"
+
+export CLAUDE_HOT_MAX_SWAPS=5
+
+set +e
+output=$("$CLAUDE_HOT" -p "fix the tests" --verbose 2>&1)
+hot_exit=$?
+set -e
+
+assert_eq "claude-hot exits cleanly with args" "0" "$hot_exit"
+assert_contains "claude-hot passes -p flag" "ARGS_RECEIVED: -p fix the tests --verbose" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 24: Detect with no sessions
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 24: Detect — No Sessions${NC}"
+
+# Wipe all JSONL files
+rm -f "${MOCK_PROJECTS}"/*.jsonl
+
+set +e
+output=$("$HOTSWAP" detect 2>&1)
+detect_exit=$?
+set -e
+assert_contains "detect shows NO_SESSION" "NO_SESSION" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 25: Help and Unknown Commands
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 25: Help & Error Handling${NC}"
+
+output=$("$HOTSWAP" help 2>&1) || true
+assert_contains "help shows usage" "Usage:" "$output"
+assert_contains "help lists commands" "auto" "$output"
+
+set +e
+output=$("$HOTSWAP" nonsense 2>&1)
+bad_exit=$?
+set -e
+assert_contains "unknown command shows error" "Unknown command" "$output"
+assert_eq "unknown command exits non-zero" "1" "$bad_exit"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────
 

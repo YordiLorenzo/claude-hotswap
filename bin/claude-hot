@@ -132,9 +132,11 @@ run_claude() {
       exit 1
     fi
 
-    # Source the new environment
+    # Source the new environment (may not exist on first swap if only subscriptions)
     if [[ -f "${HOTSWAP_DIR}/active-env.sh" ]]; then
+      set +u
       source "${HOTSWAP_DIR}/active-env.sh"
+      set -u
     fi
 
     echo ""

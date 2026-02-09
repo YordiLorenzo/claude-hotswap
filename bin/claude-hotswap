@@ -36,13 +36,18 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # Platform-aware secure storage
+# Set CLAUDE_HOTSWAP_FILE_STORAGE=1 to force file-based storage (for testing/CI)
+_use_keychain() {
+  [[ -z "${CLAUDE_HOTSWAP_FILE_STORAGE:-}" ]] && command -v security &>/dev/null
+}
+
 store_secret() {
   local service="$1" key="$2"
-  if command -v security &>/dev/null; then
+  if _use_keychain; then
     # macOS Keychain
     security add-generic-password -a "claude-hotswap" -s "$service" -w "$key" -U 2>/dev/null || true
   else
-    # Linux: store in encrypted file (fallback)
+    # File-based storage (Linux or testing)
     local secrets_dir="${HOTSWAP_DIR}/.secrets"
     mkdir -p "$secrets_dir"
     chmod 700 "$secrets_dir"
@@ -53,7 +58,7 @@ store_secret() {
 
 retrieve_secret() {
   local service="$1"
-  if command -v security &>/dev/null; then
+  if _use_keychain; then
     security find-generic-password -a "claude-hotswap" -s "$service" -w 2>/dev/null
   else
     local secrets_file="${HOTSWAP_DIR}/.secrets/${service}"
@@ -65,7 +70,7 @@ retrieve_secret() {
 
 delete_secret() {
   local service="$1"
-  if command -v security &>/dev/null; then
+  if _use_keychain; then
     security delete-generic-password -a "claude-hotswap" -s "$service" 2>/dev/null || true
   else
     rm -f "${HOTSWAP_DIR}/.secrets/${service}"

@@ -1,0 +1,7 @@
+*.tmp
+.secrets/
+active-env.sh
+keys.json
+hook.log
+.lock
+.DS_Store

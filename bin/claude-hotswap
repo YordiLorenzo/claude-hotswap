@@ -1,0 +1,735 @@
+#!/usr/bin/env bash
+# claude-hotswap — Manage and rotate Claude Code API keys/subscriptions
+# when rate limits are hit.
+#
+# Usage:
+#   claude-hotswap add <name> <api-key> [note]   Add a new API key
+#   claude-hotswap add-sub <name> <config-dir> [note]  Add a subscription config
+#   claude-hotswap list                            List all configured keys
+#   claude-hotswap swap [name]                     Swap to next key (or named key)
+#   claude-hotswap current                         Show current active key
+#   claude-hotswap status                          Show status with limit info
+#   claude-hotswap remove <name>                   Remove a key
+#   claude-hotswap detect                          Check if current session hit limit
+#   claude-hotswap auto                            Auto-detect limit + swap + launch
+#   claude-hotswap reset                           Reset all keys to available
+
+set -euo pipefail
+
+HOTSWAP_DIR="${CLAUDE_HOTSWAP_DIR:-${HOME}/.claude/hotswap}"
+KEYS_FILE="${HOTSWAP_DIR}/keys.json"
+LOCK_FILE="${HOTSWAP_DIR}/.lock"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Ensure deps
+if ! command -v jq &>/dev/null; then
+  echo -e "${RED}Error: jq is required. Install with: brew install jq${NC}"
+  exit 1
+fi
+
+# Platform-aware secure storage
+store_secret() {
+  local service="$1" key="$2"
+  if command -v security &>/dev/null; then
+    # macOS Keychain
+    security add-generic-password -a "claude-hotswap" -s "$service" -w "$key" -U 2>/dev/null || true
+  else
+    # Linux: store in encrypted file (fallback)
+    local secrets_dir="${HOTSWAP_DIR}/.secrets"
+    mkdir -p "$secrets_dir"
+    chmod 700 "$secrets_dir"
+    echo "$key" > "${secrets_dir}/${service}"
+    chmod 600 "${secrets_dir}/${service}"
+  fi
+}
+
+retrieve_secret() {
+  local service="$1"
+  if command -v security &>/dev/null; then
+    security find-generic-password -a "claude-hotswap" -s "$service" -w 2>/dev/null
+  else
+    local secrets_file="${HOTSWAP_DIR}/.secrets/${service}"
+    if [[ -f "$secrets_file" ]]; then
+      cat "$secrets_file"
+    fi
+  fi
+}
+
+delete_secret() {
+  local service="$1"
+  if command -v security &>/dev/null; then
+    security delete-generic-password -a "claude-hotswap" -s "$service" 2>/dev/null || true
+  else
+    rm -f "${HOTSWAP_DIR}/.secrets/${service}"
+  fi
+}
+
+# Initialize keys file if missing
+init_keys() {
+  mkdir -p "$HOTSWAP_DIR"
+  if [[ ! -f "$KEYS_FILE" ]]; then
+    cat > "$KEYS_FILE" <<'JSON'
+{
+  "keys": [
+    {
+      "name": "primary",
+      "type": "subscription",
+      "note": "Main Claude subscription (OAuth login)",
+      "active": true,
+      "exhausted": false,
+      "exhaustedAt": null,
+      "resetsAt": null
+    }
+  ],
+  "current": 0,
+  "lastSwap": null,
+  "swapHistory": []
+}
+JSON
+  fi
+}
+
+# Acquire a file lock (prevent concurrent swaps)
+acquire_lock() {
+  local attempts=0
+  while [[ -f "$LOCK_FILE" ]] && [[ $attempts -lt 10 ]]; do
+    sleep 0.1
+    ((attempts++))
+  done
+  echo $$ > "$LOCK_FILE"
+}
+
+release_lock() {
+  rm -f "$LOCK_FILE"
+}
+
+trap release_lock EXIT
+
+# Read keys
+read_keys() {
+  cat "$KEYS_FILE"
+}
+
+# Write keys
+write_keys() {
+  local data="$1"
+  echo "$data" | jq '.' > "$KEYS_FILE"
+}
+
+# Add an API key
+cmd_add() {
+  local name="${1:?Usage: claude-hotswap add <name> <api-key> [note]}"
+  local key="${2:?Usage: claude-hotswap add <name> <api-key> [note]}"
+  local note="${3:-}"
+
+  init_keys
+  acquire_lock
+
+  # Validate key format (sk-ant-*)
+  if [[ ! "$key" =~ ^sk-ant- ]]; then
+    echo -e "${YELLOW}Warning: Key doesn't match expected format (sk-ant-*). Adding anyway.${NC}"
+  fi
+
+  # Check for duplicate name
+  local existing
+  existing=$(jq -r --arg n "$name" '.keys[] | select(.name == $n) | .name' "$KEYS_FILE")
+  if [[ -n "$existing" ]]; then
+    echo -e "${RED}Error: Key with name '$name' already exists. Remove it first.${NC}"
+    exit 1
+  fi
+
+  # Store key securely
+  store_secret "claude-hotswap-${name}" "$key"
+
+  local data
+  data=$(read_keys)
+  data=$(echo "$data" | jq \
+    --arg name "$name" \
+    --arg note "$note" \
+    '.keys += [{
+      name: $name,
+      type: "api_key",
+      note: $note,
+      active: true,
+      exhausted: false,
+      exhaustedAt: null,
+      resetsAt: null
+    }]')
+  write_keys "$data"
+
+  echo -e "${GREEN}Added API key '${name}' (stored securely)${NC}"
+}
+
+# Add a subscription config directory
+cmd_add_sub() {
+  local name="${1:?Usage: claude-hotswap add-sub <name> <config-dir> [note]}"
+  local config_dir="${2:?Usage: claude-hotswap add-sub <name> <config-dir> [note]}"
+  local note="${3:-}"
+
+  init_keys
+  acquire_lock
+
+  # Validate config dir exists
+  if [[ ! -d "$config_dir" ]]; then
+    echo -e "${RED}Error: Config directory '$config_dir' does not exist.${NC}"
+    echo -e "${YELLOW}Tip: Log in with a different account first:${NC}"
+    echo -e "  CLAUDE_CONFIG_DIR=$config_dir claude"
+    echo -e "  # Then run /login inside Claude Code"
+    exit 1
+  fi
+
+  local existing
+  existing=$(jq -r --arg n "$name" '.keys[] | select(.name == $n) | .name' "$KEYS_FILE")
+  if [[ -n "$existing" ]]; then
+    echo -e "${RED}Error: Key with name '$name' already exists.${NC}"
+    exit 1
+  fi
+
+  local data
+  data=$(read_keys)
+  data=$(echo "$data" | jq \
+    --arg name "$name" \
+    --arg note "$note" \
+    --arg dir "$config_dir" \
+    '.keys += [{
+      name: $name,
+      type: "subscription",
+      configDir: $dir,
+      note: $note,
+      active: true,
+      exhausted: false,
+      exhaustedAt: null,
+      resetsAt: null
+    }]')
+  write_keys "$data"
+
+  echo -e "${GREEN}Added subscription config '${name}' -> ${config_dir}${NC}"
+}
+
+# List all keys
+cmd_list() {
+  init_keys
+  local data
+  data=$(read_keys)
+  local current
+  current=$(echo "$data" | jq -r '.current')
+  local count
+  count=$(echo "$data" | jq '.keys | length')
+
+  echo -e "${BOLD}Claude Hotswap Keys${NC} ($count configured)"
+  echo ""
+
+  for i in $(seq 0 $((count - 1))); do
+    local name type note exhausted active
+    name=$(echo "$data" | jq -r ".keys[$i].name")
+    type=$(echo "$data" | jq -r ".keys[$i].type")
+    note=$(echo "$data" | jq -r ".keys[$i].note // \"\"")
+    exhausted=$(echo "$data" | jq -r ".keys[$i].exhausted")
+    active=$(echo "$data" | jq -r ".keys[$i].active")
+    local resets_at
+    resets_at=$(echo "$data" | jq -r ".keys[$i].resetsAt // \"\"")
+
+    local marker=""
+    if [[ $i -eq $current ]]; then
+      marker="${GREEN}-> ${NC}"
+    else
+      marker="   "
+    fi
+
+    local status_icon
+    if [[ "$exhausted" == "true" ]]; then
+      status_icon="${RED}*${NC} EXHAUSTED"
+      if [[ -n "$resets_at" && "$resets_at" != "null" ]]; then
+        status_icon="${status_icon} (resets: ${resets_at})"
+      fi
+    elif [[ "$active" == "false" ]]; then
+      status_icon="${YELLOW}*${NC} DISABLED"
+    else
+      status_icon="${GREEN}*${NC} AVAILABLE"
+    fi
+
+    local type_label
+    if [[ "$type" == "api_key" ]]; then
+      type_label="${CYAN}API${NC}"
+    else
+      type_label="${BLUE}SUB${NC}"
+    fi
+
+    echo -e "${marker}${BOLD}${name}${NC} [${type_label}] ${status_icon}"
+    if [[ -n "$note" ]]; then
+      echo -e "      ${note}"
+    fi
+  done
+
+  echo ""
+  local last_swap
+  last_swap=$(echo "$data" | jq -r '.lastSwap // "never"')
+  echo -e "Last swap: ${last_swap}"
+}
+
+# Get the API key from secure storage
+get_key_from_store() {
+  local name="$1"
+  retrieve_secret "claude-hotswap-${name}"
+}
+
+# Swap to next available key
+cmd_swap() {
+  local target_name="${1:-}"
+
+  init_keys
+  acquire_lock
+
+  local data
+  data=$(read_keys)
+  local current
+  current=$(echo "$data" | jq -r '.current')
+  local count
+  count=$(echo "$data" | jq '.keys | length')
+
+  if [[ $count -le 1 && -z "$target_name" ]]; then
+    echo -e "${RED}Only one key configured. Add more keys first:${NC}"
+    echo "  claude-hotswap add <name> <api-key>"
+    echo "  claude-hotswap add-sub <name> <config-dir>"
+    exit 1
+  fi
+
+  # Mark current as exhausted
+  local current_name
+  current_name=$(echo "$data" | jq -r ".keys[$current].name")
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  data=$(echo "$data" | jq \
+    --argjson idx "$current" \
+    --arg now "$now" \
+    '.keys[$idx].exhausted = true | .keys[$idx].exhaustedAt = $now')
+
+  local next_idx=-1
+
+  if [[ -n "$target_name" ]]; then
+    # Swap to specific key
+    next_idx=$(echo "$data" | jq -r --arg n "$target_name" \
+      '[.keys | to_entries[] | select(.value.name == $n and .value.active == true and .value.exhausted != true)] | .[0].key // -1')
+  else
+    # Find next available key (round-robin)
+    for offset in $(seq 1 $((count))); do
+      local candidate=$(( (current + offset) % count ))
+      local is_available
+      is_available=$(echo "$data" | jq -r --argjson c "$candidate" \
+        '.keys[$c] | select(.active == true and .exhausted != true) | "yes"')
+      if [[ "$is_available" == "yes" ]]; then
+        next_idx=$candidate
+        break
+      fi
+    done
+  fi
+
+  if [[ $next_idx -eq -1 ]]; then
+    echo -e "${RED}No available keys to swap to! All keys are exhausted.${NC}"
+    echo -e "${YELLOW}Wait for rate limits to reset, or add more keys.${NC}"
+
+    # Show reset times
+    echo ""
+    for i in $(seq 0 $((count - 1))); do
+      local n r
+      n=$(echo "$data" | jq -r ".keys[$i].name")
+      r=$(echo "$data" | jq -r ".keys[$i].resetsAt // \"unknown\"")
+      echo -e "  ${n}: resets at ${r}"
+    done
+
+    write_keys "$data"
+    exit 1
+  fi
+
+  # Record swap
+  local next_name
+  next_name=$(echo "$data" | jq -r ".keys[$next_idx].name")
+  data=$(echo "$data" | jq \
+    --argjson idx "$next_idx" \
+    --arg now "$now" \
+    --arg from "$current_name" \
+    --arg to "$next_name" \
+    '.current = $idx | .lastSwap = $now | .swapHistory += [{from: $from, to: $to, at: $now}]')
+
+  write_keys "$data"
+
+  # Apply the new key
+  local next_type
+  next_type=$(echo "$data" | jq -r ".keys[$next_idx].type")
+
+  if [[ "$next_type" == "api_key" ]]; then
+    local api_key
+    api_key=$(get_key_from_store "$next_name")
+    if [[ -z "$api_key" ]]; then
+      echo -e "${RED}Error: Could not retrieve API key for '${next_name}' from secure storage${NC}"
+      exit 1
+    fi
+    export ANTHROPIC_API_KEY="$api_key"
+    # Write to a sourceable env file
+    echo "export ANTHROPIC_API_KEY='${api_key}'" > "${HOTSWAP_DIR}/active-env.sh"
+    chmod 600 "${HOTSWAP_DIR}/active-env.sh"
+    echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [API Key]${NC}"
+    echo -e "${YELLOW}Run: source ~/.claude/hotswap/active-env.sh${NC}"
+    echo -e "${YELLOW}Then start a new claude session.${NC}"
+  else
+    local config_dir
+    config_dir=$(echo "$data" | jq -r ".keys[$next_idx].configDir // \"\"")
+    if [[ -n "$config_dir" && "$config_dir" != "null" ]]; then
+      export CLAUDE_CONFIG_DIR="$config_dir"
+      echo "export CLAUDE_CONFIG_DIR='${config_dir}'" > "${HOTSWAP_DIR}/active-env.sh"
+      # Unset API key if present
+      echo "unset ANTHROPIC_API_KEY" >> "${HOTSWAP_DIR}/active-env.sh"
+      chmod 600 "${HOTSWAP_DIR}/active-env.sh"
+      echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [Subscription: ${config_dir}]${NC}"
+    else
+      # Default subscription (no config dir override)
+      echo "unset ANTHROPIC_API_KEY" > "${HOTSWAP_DIR}/active-env.sh"
+      echo "unset CLAUDE_CONFIG_DIR" >> "${HOTSWAP_DIR}/active-env.sh"
+      chmod 600 "${HOTSWAP_DIR}/active-env.sh"
+      echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [Default Subscription]${NC}"
+    fi
+    echo -e "${YELLOW}Run: source ~/.claude/hotswap/active-env.sh${NC}"
+    echo -e "${YELLOW}Then start a new claude session.${NC}"
+  fi
+}
+
+# Show current
+cmd_current() {
+  init_keys
+  local data current name type
+  data=$(read_keys)
+  current=$(echo "$data" | jq -r '.current')
+  name=$(echo "$data" | jq -r ".keys[$current].name")
+  type=$(echo "$data" | jq -r ".keys[$current].type")
+  echo -e "${BOLD}Current:${NC} ${name} [${type}]"
+}
+
+# Detect rate limit from most recent session transcript
+cmd_detect() {
+  local projects_dir="${HOME}/.claude/projects"
+  local hit=false
+  local reset_time=""
+  local session_id=""
+  local session_cwd=""
+
+  # Find most recent JSONL (macOS stat format; falls back to GNU stat)
+  local latest_jsonl
+  latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
+    -exec stat -f "%m %N" {} \; 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+
+  # GNU/Linux fallback
+  if [[ -z "$latest_jsonl" ]]; then
+    latest_jsonl=$(find "$projects_dir" -maxdepth 2 -name "*.jsonl" -not -path "*/subagents/*" \
+      -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+  fi
+
+  if [[ -z "$latest_jsonl" ]]; then
+    echo "NO_SESSION"
+    return 1
+  fi
+
+  # Extract session ID from the filename (UUID.jsonl)
+  session_id=$(basename "$latest_jsonl" .jsonl)
+
+  # Extract cwd from the first line of the JSONL
+  session_cwd=$(head -1 "$latest_jsonl" | python3 -c "
+import sys, json
+try:
+    obj = json.loads(sys.stdin.readline().strip())
+    print(obj.get('cwd', ''))
+except:
+    pass
+" 2>/dev/null || true)
+
+  # Check last 20 lines for rate_limit error
+  local limit_line
+  limit_line=$(tail -20 "$latest_jsonl" | grep '"error":"rate_limit"' | tail -1 || true)
+
+  if [[ -n "$limit_line" ]]; then
+    hit=true
+    # Extract reset time from message text
+    reset_time=$(echo "$limit_line" | python3 -c "
+import sys, json, re
+for line in sys.stdin:
+    try:
+        obj = json.loads(line.strip())
+        msg = obj.get('message', {})
+        if isinstance(msg, dict):
+            content = msg.get('content', [])
+            for c in content:
+                if isinstance(c, dict) and c.get('type') == 'text':
+                    text = c.get('text', '')
+                    m = re.search(r'resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', text, re.I)
+                    if m:
+                        print(m.group(1))
+                        break
+    except:
+        pass
+" 2>/dev/null || true)
+  fi
+
+  if [[ "$hit" == "true" ]]; then
+    echo "LIMIT_HIT"
+    echo "SESSION_ID:${session_id}"
+    if [[ -n "$session_cwd" ]]; then
+      echo "SESSION_CWD:${session_cwd}"
+    fi
+    if [[ -n "$reset_time" ]]; then
+      echo "RESETS_AT:${reset_time}"
+    fi
+    return 0
+  else
+    echo "OK"
+    return 1
+  fi
+}
+
+# Auto mode: detect + swap + resume session
+cmd_auto() {
+  local do_resume="${1:-}"
+  init_keys
+
+  echo -e "${BOLD}Claude Hotswap — Auto Mode${NC}"
+  echo ""
+
+  local detect_output
+  detect_output=$(cmd_detect 2>/dev/null) || true
+
+  if echo "$detect_output" | grep -q "LIMIT_HIT"; then
+    local reset_info session_id session_cwd
+    reset_info=$(echo "$detect_output" | grep "RESETS_AT:" | cut -d: -f2- || true)
+    session_id=$(echo "$detect_output" | grep "SESSION_ID:" | cut -d: -f2- || true)
+    session_cwd=$(echo "$detect_output" | grep "SESSION_CWD:" | cut -d: -f2- || true)
+
+    echo -e "${RED}Rate limit detected!${NC}"
+    if [[ -n "$session_id" ]]; then
+      echo -e "  Session: ${CYAN}${session_id}${NC}"
+    fi
+    if [[ -n "$session_cwd" ]]; then
+      echo -e "  Working dir: ${session_cwd}"
+    fi
+    if [[ -n "$reset_info" ]]; then
+      echo -e "  Resets at: ${YELLOW}${reset_info}${NC}"
+
+      # Update current key's reset time
+      local data current
+      data=$(read_keys)
+      current=$(echo "$data" | jq -r '.current')
+      data=$(echo "$data" | jq \
+        --argjson idx "$current" \
+        --arg resets "$reset_info" \
+        '.keys[$idx].resetsAt = $resets')
+      write_keys "$data"
+    fi
+
+    echo ""
+    echo -e "Attempting swap..."
+    cmd_swap
+
+    echo ""
+
+    # Save session resume info
+    if [[ -n "$session_id" ]]; then
+      jq --arg sid "$session_id" --arg cwd "${session_cwd:-}" \
+        '.lastLimitedSession = {id: $sid, cwd: $cwd}' "$KEYS_FILE" > "${KEYS_FILE}.tmp" \
+        && mv "${KEYS_FILE}.tmp" "$KEYS_FILE"
+    fi
+
+    # Offer to resume the session
+    if [[ -n "$session_id" ]]; then
+      echo -e "${BOLD}Resume options:${NC}"
+      echo ""
+      echo -e "  ${GREEN}Option 1 — Resume in one shot:${NC}"
+      echo -e "    source ~/.claude/hotswap/active-env.sh && claude --resume ${session_id}"
+      echo ""
+      echo -e "  ${GREEN}Option 2 — Use the wrapper:${NC}"
+      echo -e "    claude-hotswap resume"
+      echo ""
+
+      if [[ "$do_resume" == "--resume" || "$do_resume" == "-r" ]]; then
+        echo -e "${CYAN}Sourcing env and resuming session...${NC}"
+        source "${HOTSWAP_DIR}/active-env.sh"
+        if [[ -n "$session_cwd" ]]; then
+          cd "$session_cwd"
+        fi
+        exec claude --resume "$session_id"
+      fi
+    fi
+  elif echo "$detect_output" | grep -q "OK"; then
+    echo -e "${GREEN}No rate limit detected. Current session is healthy.${NC}"
+  else
+    echo -e "${YELLOW}Could not determine session status.${NC}"
+  fi
+}
+
+# Resume the last rate-limited session with the new key
+cmd_resume() {
+  init_keys
+
+  local session_id session_cwd
+  session_id=$(jq -r '.lastLimitedSession.id // empty' "$KEYS_FILE")
+  session_cwd=$(jq -r '.lastLimitedSession.cwd // empty' "$KEYS_FILE")
+
+  if [[ -z "$session_id" ]]; then
+    echo -e "${RED}No rate-limited session to resume.${NC}"
+    echo -e "Run 'claude-hotswap auto' first to detect and swap."
+    exit 1
+  fi
+
+  echo -e "${BOLD}Claude Hotswap — Resuming Session${NC}"
+  echo ""
+
+  local data current name type
+  data=$(read_keys)
+  current=$(echo "$data" | jq -r '.current')
+  name=$(echo "$data" | jq -r ".keys[$current].name")
+  type=$(echo "$data" | jq -r ".keys[$current].type")
+
+  echo -e "  Key: ${GREEN}${name}${NC} [${type}]"
+  echo -e "  Session: ${CYAN}${session_id}${NC}"
+  if [[ -n "$session_cwd" ]]; then
+    echo -e "  Working dir: ${session_cwd}"
+  fi
+  echo ""
+
+  # Source the active env
+  if [[ -f "${HOTSWAP_DIR}/active-env.sh" ]]; then
+    source "${HOTSWAP_DIR}/active-env.sh"
+  fi
+
+  # Change to session working directory if available
+  if [[ -n "$session_cwd" && -d "$session_cwd" ]]; then
+    cd "$session_cwd"
+  fi
+
+  echo -e "${CYAN}Launching claude --resume ${session_id} ...${NC}"
+  echo ""
+  exec claude --resume "$session_id"
+}
+
+# Remove a key
+cmd_remove() {
+  local name="${1:?Usage: claude-hotswap remove <name>}"
+
+  init_keys
+  acquire_lock
+
+  if [[ "$name" == "primary" ]]; then
+    echo -e "${RED}Cannot remove the primary subscription key.${NC}"
+    exit 1
+  fi
+
+  # Remove from secure storage
+  delete_secret "claude-hotswap-${name}"
+
+  local data
+  data=$(read_keys)
+  local current_idx
+  current_idx=$(echo "$data" | jq -r '.current')
+  local current_name
+  current_name=$(echo "$data" | jq -r ".keys[$current_idx].name")
+
+  data=$(echo "$data" | jq --arg n "$name" '.keys |= map(select(.name != $n))')
+
+  # Recalculate current index
+  if [[ "$current_name" == "$name" ]]; then
+    data=$(echo "$data" | jq '.current = 0')
+  else
+    local new_idx
+    new_idx=$(echo "$data" | jq -r --arg n "$current_name" \
+      '[.keys | to_entries[] | select(.value.name == $n)] | .[0].key // 0')
+    data=$(echo "$data" | jq --argjson idx "$new_idx" '.current = $idx')
+  fi
+
+  write_keys "$data"
+  echo -e "${GREEN}Removed key '${name}'${NC}"
+}
+
+# Reset all keys to available
+cmd_reset() {
+  init_keys
+  acquire_lock
+
+  local data
+  data=$(read_keys)
+  data=$(echo "$data" | jq '.keys |= map(.exhausted = false | .exhaustedAt = null | .resetsAt = null)')
+  write_keys "$data"
+  echo -e "${GREEN}All keys reset to available.${NC}"
+}
+
+# Status
+cmd_status() {
+  init_keys
+
+  echo -e "${BOLD}Claude Hotswap Status${NC}"
+  echo ""
+
+  # Detect current limit state
+  local detect_output
+  detect_output=$(cmd_detect 2>/dev/null) || true
+
+  if echo "$detect_output" | grep -q "LIMIT_HIT"; then
+    echo -e "  Session: ${RED}RATE LIMITED${NC}"
+  elif echo "$detect_output" | grep -q "OK"; then
+    echo -e "  Session: ${GREEN}HEALTHY${NC}"
+  else
+    echo -e "  Session: ${YELLOW}UNKNOWN${NC}"
+  fi
+
+  echo ""
+  cmd_list
+}
+
+# Main dispatch
+main() {
+  local cmd="${1:-status}"
+  shift || true
+
+  case "$cmd" in
+    add)       cmd_add "$@" ;;
+    add-sub)   cmd_add_sub "$@" ;;
+    list)      cmd_list "$@" ;;
+    swap)      cmd_swap "$@" ;;
+    current)   cmd_current "$@" ;;
+    status)    cmd_status "$@" ;;
+    remove)    cmd_remove "$@" ;;
+    detect)    cmd_detect "$@" ;;
+    auto)      cmd_auto "$@" ;;
+    resume)    cmd_resume "$@" ;;
+    reset)     cmd_reset "$@" ;;
+    help|-h|--help)
+      echo "Usage: claude-hotswap <command> [args]"
+      echo ""
+      echo "Commands:"
+      echo "  add <name> <api-key> [note]       Add an API key (stored securely)"
+      echo "  add-sub <name> <dir> [note]        Add a subscription config directory"
+      echo "  list                                List all configured keys"
+      echo "  swap [name]                         Swap to next available key"
+      echo "  current                             Show active key"
+      echo "  status                              Show full status"
+      echo "  detect                              Check if session hit rate limit"
+      echo "  auto                                Auto-detect + swap + show resume"
+      echo "  auto --resume                       Auto-detect + swap + resume session"
+      echo "  resume                              Resume last limited session with new key"
+      echo "  reset                               Reset all exhausted keys"
+      echo "  remove <name>                       Remove a key"
+      echo "  help                                Show this help"
+      ;;
+    *)
+      echo -e "${RED}Unknown command: ${cmd}${NC}"
+      echo "Run 'claude-hotswap help' for usage."
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

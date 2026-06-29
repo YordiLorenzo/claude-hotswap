@@ -3,7 +3,8 @@
 # when rate limits are hit.
 #
 # Usage:
-#   claude-hotswap add <name> <api-key> [note]   Add a new API key
+#   claude-hotswap add <name> <api-key> [note]   Add a new Console API key
+#   claude-hotswap add-token <name> <token> [note]  Add a subscription token (setup-token)
 #   claude-hotswap add-sub <name> <config-dir> [note]  Add a subscription config
 #   claude-hotswap list                            List all configured keys
 #   claude-hotswap swap [name]                     Swap to next key (or named key)
@@ -173,6 +174,58 @@ cmd_add() {
   echo -e "${GREEN}Added API key '${name}' (stored securely)${NC}"
 }
 
+# Add a subscription OAuth token (from `claude setup-token`).
+# Unlike API keys (Console pay-per-token billing), these tokens authenticate
+# against a Claude Pro/Max SUBSCRIPTION and consume the plan's quota. This is
+# the right credential type for swapping between multiple Max subscriptions
+# on a single machine, because it sidesteps the macOS Keychain (which holds
+# only ONE shared login slot per OS user) by injecting CLAUDE_CODE_OAUTH_TOKEN
+# into the environment at launch instead.
+cmd_add_token() {
+  local name="${1:?Usage: claude-hotswap add-token <name> <oauth-token> [note]}"
+  local token="${2:?Usage: claude-hotswap add-token <name> <oauth-token> [note]}"
+  local note="${3:-}"
+
+  init_keys
+  acquire_lock
+
+  # Validate token format (subscription OAuth tokens are sk-ant-oat*)
+  if [[ ! "$token" =~ ^sk-ant-oat ]]; then
+    echo -e "${YELLOW}Warning: Token doesn't match expected format (sk-ant-oat*).${NC}"
+    echo -e "${YELLOW}Generate one with: claude setup-token${NC}"
+    echo -e "${YELLOW}Adding anyway.${NC}"
+  fi
+
+  # Check for duplicate name
+  local existing
+  existing=$(jq -r --arg n "$name" '.keys[] | select(.name == $n) | .name' "$KEYS_FILE")
+  if [[ -n "$existing" ]]; then
+    echo -e "${RED}Error: Key with name '$name' already exists. Remove it first.${NC}"
+    exit 1
+  fi
+
+  # Store token securely (same secret store as API keys)
+  store_secret "claude-hotswap-${name}" "$token"
+
+  local data
+  data=$(read_keys)
+  data=$(echo "$data" | jq \
+    --arg name "$name" \
+    --arg note "$note" \
+    '.keys += [{
+      name: $name,
+      type: "oauth_token",
+      note: $note,
+      active: true,
+      exhausted: false,
+      exhaustedAt: null,
+      resetsAt: null
+    }]')
+  write_keys "$data"
+
+  echo -e "${GREEN}Added subscription token '${name}' (stored securely)${NC}"
+}
+
 # Add a subscription config directory
 cmd_add_sub() {
   local name="${1:?Usage: claude-hotswap add-sub <name> <config-dir> [note]}"
@@ -262,11 +315,11 @@ cmd_list() {
     fi
 
     local type_label
-    if [[ "$type" == "api_key" ]]; then
-      type_label="${CYAN}API${NC}"
-    else
-      type_label="${BLUE}SUB${NC}"
-    fi
+    case "$type" in
+      api_key)     type_label="${CYAN}API${NC}" ;;
+      oauth_token) type_label="${GREEN}TOKEN${NC}" ;;
+      *)           type_label="${BLUE}SUB${NC}" ;;
+    esac
 
     echo -e "${marker}${BOLD}${name}${NC} [${type_label}] ${status_icon}"
     if [[ -n "$note" ]]; then
@@ -367,44 +420,69 @@ cmd_swap() {
 
   write_keys "$data"
 
-  # Apply the new key
+  # Apply the new key.
+  # active-env.sh is always written from a CLEAN slate: every swap first
+  # unsets all three credential channels, then sets only the one the target
+  # needs. This guarantees no stale credential leaks across swaps (e.g.
+  # swapping from an oauth_token back to the default keychain login must
+  # clear CLAUDE_CODE_OAUTH_TOKEN, or the old token would silently win).
   local next_type
   next_type=$(echo "$data" | jq -r ".keys[$next_idx].type")
+  local env_file="${HOTSWAP_DIR}/active-env.sh"
 
-  if [[ "$next_type" == "api_key" ]]; then
-    local api_key
-    api_key=$(get_key_from_store "$next_name")
-    if [[ -z "$api_key" ]]; then
-      echo -e "${RED}Error: Could not retrieve API key for '${next_name}' from secure storage${NC}"
-      exit 1
-    fi
-    export ANTHROPIC_API_KEY="$api_key"
-    # Write to a sourceable env file
-    echo "export ANTHROPIC_API_KEY='${api_key}'" > "${HOTSWAP_DIR}/active-env.sh"
-    chmod 600 "${HOTSWAP_DIR}/active-env.sh"
-    echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [API Key]${NC}"
-    echo -e "${YELLOW}Run: source ~/.claude/hotswap/active-env.sh${NC}"
-    echo -e "${YELLOW}Then start a new claude session.${NC}"
-  else
-    local config_dir
-    config_dir=$(echo "$data" | jq -r ".keys[$next_idx].configDir // \"\"")
-    if [[ -n "$config_dir" && "$config_dir" != "null" ]]; then
-      export CLAUDE_CONFIG_DIR="$config_dir"
-      echo "export CLAUDE_CONFIG_DIR='${config_dir}'" > "${HOTSWAP_DIR}/active-env.sh"
-      # Unset API key if present
-      echo "unset ANTHROPIC_API_KEY" >> "${HOTSWAP_DIR}/active-env.sh"
-      chmod 600 "${HOTSWAP_DIR}/active-env.sh"
-      echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [Subscription: ${config_dir}]${NC}"
-    else
-      # Default subscription (no config dir override)
-      echo "unset ANTHROPIC_API_KEY" > "${HOTSWAP_DIR}/active-env.sh"
-      echo "unset CLAUDE_CONFIG_DIR" >> "${HOTSWAP_DIR}/active-env.sh"
-      chmod 600 "${HOTSWAP_DIR}/active-env.sh"
-      echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [Default Subscription]${NC}"
-    fi
-    echo -e "${YELLOW}Run: source ~/.claude/hotswap/active-env.sh${NC}"
-    echo -e "${YELLOW}Then start a new claude session.${NC}"
-  fi
+  # Lock permissions before any secret is written into the file.
+  : > "$env_file"
+  chmod 600 "$env_file"
+  {
+    echo "# Generated by claude-hotswap — source before launching claude."
+    echo "unset ANTHROPIC_API_KEY"
+    echo "unset CLAUDE_CODE_OAUTH_TOKEN"
+    echo "unset CLAUDE_CONFIG_DIR"
+  } >> "$env_file"
+
+  local swap_label=""
+  case "$next_type" in
+    api_key)
+      local api_key
+      api_key=$(get_key_from_store "$next_name")
+      if [[ -z "$api_key" ]]; then
+        echo -e "${RED}Error: Could not retrieve API key for '${next_name}' from secure storage${NC}"
+        exit 1
+      fi
+      export ANTHROPIC_API_KEY="$api_key"
+      echo "export ANTHROPIC_API_KEY='${api_key}'" >> "$env_file"
+      swap_label="API Key"
+      ;;
+    oauth_token)
+      local oauth_token
+      oauth_token=$(get_key_from_store "$next_name")
+      if [[ -z "$oauth_token" ]]; then
+        echo -e "${RED}Error: Could not retrieve subscription token for '${next_name}' from secure storage${NC}"
+        exit 1
+      fi
+      export CLAUDE_CODE_OAUTH_TOKEN="$oauth_token"
+      echo "export CLAUDE_CODE_OAUTH_TOKEN='${oauth_token}'" >> "$env_file"
+      swap_label="Subscription Token"
+      ;;
+    *)
+      # Subscription via config dir, or the default keychain login.
+      local config_dir
+      config_dir=$(echo "$data" | jq -r ".keys[$next_idx].configDir // \"\"")
+      if [[ -n "$config_dir" && "$config_dir" != "null" ]]; then
+        export CLAUDE_CONFIG_DIR="$config_dir"
+        echo "export CLAUDE_CONFIG_DIR='${config_dir}'" >> "$env_file"
+        swap_label="Subscription: ${config_dir}"
+      else
+        # Default subscription — ambient keychain login, no env override.
+        swap_label="Default Subscription"
+      fi
+      ;;
+  esac
+
+  chmod 600 "$env_file"
+  echo -e "${GREEN}Swapped: ${current_name} -> ${next_name} [${swap_label}]${NC}"
+  echo -e "${YELLOW}Run: source ~/.claude/hotswap/active-env.sh${NC}"
+  echo -e "${YELLOW}Then start a new claude session.${NC}"
 }
 
 # Show current
@@ -702,6 +780,7 @@ main() {
   case "$cmd" in
     add)       cmd_add "$@" ;;
     add-sub)   cmd_add_sub "$@" ;;
+    add-token) cmd_add_token "$@" ;;
     list)      cmd_list "$@" ;;
     swap)      cmd_swap "$@" ;;
     current)   cmd_current "$@" ;;
@@ -715,7 +794,8 @@ main() {
       echo "Usage: claude-hotswap <command> [args]"
       echo ""
       echo "Commands:"
-      echo "  add <name> <api-key> [note]       Add an API key (stored securely)"
+      echo "  add <name> <api-key> [note]       Add a Console API key (stored securely)"
+      echo "  add-token <name> <token> [note]    Add a subscription token (claude setup-token)"
       echo "  add-sub <name> <dir> [note]        Add a subscription config directory"
       echo "  list                                List all configured keys"
       echo "  swap [name]                         Swap to next available key"

@@ -1174,6 +1174,51 @@ assert_eq "disabled hook did not swap" "$before_current" "$after_current"
 echo ""
 
 # ─────────────────────────────────────────────────────
+# TEST 36: reset --due (timer-safe selective reset)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 36: reset --due${NC}"
+
+# Craft keys: one whose window has passed, one still ahead, one unknown+old.
+read EXDUE RDUE EXAH RAH EXOLD < <(python3 -c "
+import datetime
+loc=datetime.datetime.now().astimezone()
+exd=(loc-datetime.timedelta(hours=6)).replace(minute=0,second=0,microsecond=0)
+rd=(exd+datetime.timedelta(hours=2)).strftime('%-I%p').lower()
+exa=(loc-datetime.timedelta(hours=1)).replace(minute=0,second=0,microsecond=0)
+ra=(exa+datetime.timedelta(hours=3)).strftime('%-I%p').lower()
+exo=(loc-datetime.timedelta(hours=6))
+U=datetime.timezone.utc
+print(exd.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'), rd,
+      exa.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'), ra,
+      exo.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'))
+")
+cat > "${MOCK_HOTSWAP}/keys.json" <<JSON
+{ "keys": [
+  {"name":"primary","type":"subscription","active":true,"exhausted":false,"exhaustedAt":null,"resetsAt":null},
+  {"name":"kdue","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXDUE","resetsAt":"$RDUE"},
+  {"name":"kahead","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXAH","resetsAt":"$RAH"},
+  {"name":"kold","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXOLD","resetsAt":"unknown"}
+], "current":0 }
+JSON
+
+output=$("$HOTSWAP" reset --due 2>&1) || true
+assert_contains "reset --due names the due key" "kdue" "$output"
+
+kdue_ex=$(jq -r '.keys[] | select(.name=="kdue") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+kahead_ex=$(jq -r '.keys[] | select(.name=="kahead") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+kold_ex=$(jq -r '.keys[] | select(.name=="kold") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "passed-window key cleared" "false" "$kdue_ex"
+assert_eq "future-window key kept" "true" "$kahead_ex"
+assert_eq "old unknown key cleared (5h15m fallback)" "false" "$kold_ex"
+
+# Idempotent: nothing due now (kahead still ahead)
+output=$("$HOTSWAP" reset --due 2>&1) || true
+assert_contains "second run reports nothing due" "No keys due" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────
 

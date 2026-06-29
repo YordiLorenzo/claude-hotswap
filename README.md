@@ -143,6 +143,16 @@ claude-hotswap resume             # Resume the rate-limited session
 claude-hotswap reset              # Mark all keys as available again
 ```
 
+Or let a timer do it — `reset --due` only clears keys whose reset window has actually elapsed (parsed from the stored reset time, with a 5h15m fallback), so it's safe to run unattended:
+
+```bash
+# macOS launchd (every 15 min) — ~/Library/LaunchAgents/com.you.hotswap-reset.plist
+#   ProgramArguments: /bin/bash -lc 'claude-hotswap reset --due'
+#   StartInterval: 900
+# or cron:
+*/15 * * * * /bin/bash -lc 'claude-hotswap reset --due' >/dev/null 2>&1
+```
+
 ### Hands-free recovery without the wrapper
 
 Don't want to run `claude-hot`? Enable auto-swap in the Stop hook. When a limit hits, the hook swaps to the next subscription, fires a notification, and records the session — so recovery is a single command:
@@ -172,6 +182,7 @@ claude-hotswap resume             # continues the exact session on the new crede
 | `claude-hotswap current` | Show the active key |
 | `claude-hotswap detect` | Check if current session hit a limit |
 | `claude-hotswap reset` | Reset all exhausted keys to available |
+| `claude-hotswap reset --due` | Reset only keys whose limit window has elapsed (safe to run on a timer) |
 | `claude-hotswap remove <name>` | Remove a key |
 | `claude-hotswap help` | Show help |
 

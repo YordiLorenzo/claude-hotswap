@@ -14,6 +14,7 @@
 #   claude-hotswap detect                          Check if current session hit limit
 #   claude-hotswap auto                            Auto-detect limit + swap + launch
 #   claude-hotswap reset                           Reset all keys to available
+#   claude-hotswap reset --due                     Reset only keys past their limit window (timer-safe)
 
 set -euo pipefail
 
@@ -737,16 +738,74 @@ cmd_remove() {
   echo -e "${GREEN}Removed key '${name}'${NC}"
 }
 
-# Reset all keys to available
+# Reset keys to available.
+#   reset          — clear ALL exhausted keys (manual catch-all)
+#   reset --due    — clear only keys whose rate-limit window has elapsed, based
+#                    on the stored reset time (or a 5h15m fallback). Safe to run
+#                    on a timer (launchd/cron) so you never reset by hand.
 cmd_reset() {
+  local due=""
+  [[ "${1:-}" == "--due" || "${1:-}" == "-d" ]] && due=1
+
   init_keys
   acquire_lock
 
   local data
   data=$(read_keys)
-  data=$(echo "$data" | jq '.keys |= map(.exhausted = false | .exhaustedAt = null | .resetsAt = null)')
+
+  if [[ -z "$due" ]]; then
+    data=$(echo "$data" | jq '.keys |= map(.exhausted = false | .exhaustedAt = null | .resetsAt = null)')
+    write_keys "$data"
+    echo -e "${GREEN}All keys reset to available.${NC}"
+    return
+  fi
+
+  # --due: ask python which exhausted keys have passed their reset window.
+  # resetsAt is a clock time ("1pm", "13:00") in the plan's timezone; we resolve
+  # it to the first such moment at/after exhaustedAt (local tz), + a 5min margin.
+  local due_names
+  due_names=$(echo "$data" | python3 -c '
+import json, sys, re, datetime, time
+d = json.load(sys.stdin)
+now = time.time()
+def reset_epoch(resets, ex_iso):
+    if resets and resets != "unknown":
+        m = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", str(resets).strip(), re.I)
+        if m:
+            h = int(m.group(1)); mn = int(m.group(2) or 0); ap = (m.group(3) or "").lower()
+            if ap == "pm" and h < 12: h += 12
+            if ap == "am" and h == 12: h = 0
+            try:
+                ex = datetime.datetime.fromisoformat(str(ex_iso).replace("Z", "+00:00")).astimezone()
+            except Exception:
+                ex = datetime.datetime.now().astimezone()
+            cand = ex.replace(hour=h % 24, minute=mn, second=0, microsecond=0)
+            if cand < ex: cand += datetime.timedelta(days=1)
+            return cand.timestamp()
+    # Fallback for unknown reset time: a conservative 5h15m cooldown.
+    try:
+        return datetime.datetime.fromisoformat(str(ex_iso).replace("Z", "+00:00")).timestamp() + 5*3600 + 900
+    except Exception:
+        return None
+for k in d.get("keys", []):
+    if k.get("exhausted"):
+        rt = reset_epoch(k.get("resetsAt"), k.get("exhaustedAt") or "")
+        if rt is not None and now >= rt + 300:
+            print(k.get("name", ""))
+' 2>/dev/null || true)
+
+  due_names=$(echo "$due_names" | grep -v '^$' || true)
+  if [[ -z "$due_names" ]]; then
+    echo -e "${BLUE}No keys due for reset.${NC}"
+    return
+  fi
+
+  local names_json
+  names_json=$(printf '%s\n' "$due_names" | jq -R . | jq -s .)
+  data=$(echo "$data" | jq --argjson due "$names_json" \
+    '.keys |= map(if ([.name] | inside($due)) then (.exhausted=false | .exhaustedAt=null | .resetsAt=null) else . end)')
   write_keys "$data"
-  echo -e "${GREEN}All keys reset to available.${NC}"
+  echo -e "${GREEN}Reset due key(s): $(echo "$due_names" | tr '\n' ' ')${NC}"
 }
 
 # Status
@@ -806,6 +865,7 @@ main() {
       echo "  auto --resume                       Auto-detect + swap + resume session"
       echo "  resume                              Resume last limited session with new key"
       echo "  reset                               Reset all exhausted keys"
+      echo "  reset --due                         Reset only keys past their limit window (timer-safe)"
       echo "  remove <name>                       Remove a key"
       echo "  help                                Show this help"
       ;;

@@ -1153,6 +1153,27 @@ assert_eq "default hook did not swap current" "$before_current" "$after_current"
 echo ""
 
 # ─────────────────────────────────────────────────────
+# TEST 35: CLAUDE_HOTSWAP_DISABLE escape hatch
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 35: Hook Disable Hatch${NC}"
+
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+before_current=$("$HOTSWAP" current 2>&1)
+
+hook_input='{"transcript_path":"'"$AUTO_JSONL"'","session_id":"'"$AUTO_SESSION"'","cwd":"/x","stop_hook_active":false}'
+# Even with AUTO on, DISABLE must make the hook a no-op (host owns swapping).
+output=$(echo "$hook_input" | CLAUDE_HOTSWAP_AUTO=1 CLAUDE_HOTSWAP_DISABLE=1 "$HOOK_SCRIPT" 2>&1) || true
+
+assert_eq "disabled hook produces no output" "" "$output"
+after_current=$("$HOTSWAP" current 2>&1)
+assert_eq "disabled hook did not swap" "$before_current" "$after_current"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────
 

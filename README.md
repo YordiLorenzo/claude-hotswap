@@ -288,6 +288,7 @@ claude-hotswap add-sub work ~/.claude/hotswap/configs/work "Work Max subscriptio
 | `CLAUDE_HOTSWAP_DIR` | `~/.claude/hotswap` | Data directory |
 | `CLAUDE_HOTSWAP_AUTO` | _(unset)_ | When set (e.g. `1`), the Stop hook **performs** the swap automatically and saves the session so you can continue with a single `claude-hotswap resume` — no wrapper. Unset = the hook only suggests. |
 | `CLAUDE_HOTSWAP_NOTIFY_CMD` | _(unset)_ | Command run with the alert text as `$1` when a limit is hit (your "ping"). Route it to Telegram, Slack, a webhook, etc. Falls back to a macOS desktop notification. |
+| `CLAUDE_HOTSWAP_DISABLE` | _(unset)_ | When set, the Stop hook is a no-op. Set it on `claude` child processes spawned by a host that manages swapping itself (e.g. a per-turn headless bridge) so the hook doesn't double-swap. |
 
 Set the hook env vars in your settings.json hook entry, e.g.:
 

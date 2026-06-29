@@ -48,6 +48,13 @@ notify() {
   fi
 }
 
+# Escape hatch: a host that manages swapping itself (e.g. a per-turn headless
+# bridge) sets CLAUDE_HOTSWAP_DISABLE=1 on its claude children so this hook
+# never also swaps — preventing a double-swap that would skip a key.
+if [[ -n "${CLAUDE_HOTSWAP_DISABLE:-}" ]]; then
+  exit 0
+fi
+
 # Read hook input from stdin
 INPUT=$(cat)
 

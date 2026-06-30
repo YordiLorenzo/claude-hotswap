@@ -977,6 +977,248 @@ fi
 echo ""
 
 # ─────────────────────────────────────────────────────
+# TEST 30: Add Subscription Token (oauth_token type)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 30: Add Subscription Token${NC}"
+
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+output=$("$HOTSWAP" add-token sub2 "sk-ant-oat01-test-token-67890" "Second Max sub" 2>&1) || true
+assert_contains "add-token confirms success" "Added subscription token" "$output"
+
+output=$("$HOTSWAP" list 2>&1) || true
+assert_contains "list shows sub2 token" "sub2" "$output"
+assert_contains "list labels it TOKEN" "TOKEN" "$output"
+
+# Stored in the secret store (file-based in test mode)
+test_count=$((test_count + 1))
+if [[ -f "${MOCK_HOTSWAP}/.secrets/claude-hotswap-sub2" ]]; then
+  echo -e "  ${GREEN}PASS${NC} token stored in secret store"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} token not stored in secret store"
+  fail_count=$((fail_count + 1))
+fi
+
+# Bad-format token still added (with warning)
+output=$("$HOTSWAP" add-token sub3 "not-a-real-token" "weird" 2>&1) || true
+assert_contains "add-token warns on bad format" "doesn't match expected format" "$output"
+assert_contains "add-token adds anyway" "Added subscription token" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 31: Swap to Subscription Token (CLAUDE_CODE_OAUTH_TOKEN)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 31: Subscription Token Swap${NC}"
+
+"$HOTSWAP" remove sub3 &>/dev/null || true
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Swap from primary → sub2 (oauth_token)
+output=$("$HOTSWAP" swap sub2 2>&1) || true
+assert_contains "swapped to token sub2" "sub2" "$output"
+assert_contains "swap labels it Subscription Token" "Subscription Token" "$output"
+
+env_content=$(cat "${MOCK_HOTSWAP}/active-env.sh")
+assert_contains "active-env sets CLAUDE_CODE_OAUTH_TOKEN" "export CLAUDE_CODE_OAUTH_TOKEN=" "$env_content"
+assert_contains "active-env has the token value" "sk-ant-oat01-test-token-67890" "$env_content"
+assert_contains "active-env unsets ANTHROPIC_API_KEY" "unset ANTHROPIC_API_KEY" "$env_content"
+assert_contains "active-env unsets CLAUDE_CONFIG_DIR" "unset CLAUDE_CONFIG_DIR" "$env_content"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 32: Clean-slate env — swapping away clears the token
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 32: Clean-Slate Env on Swap${NC}"
+
+# Now swap back to the default subscription (primary). The token must be
+# unset, otherwise the stale CLAUDE_CODE_OAUTH_TOKEN would silently win.
+# Reset first so primary is available again (swap refuses exhausted targets).
+"$HOTSWAP" reset &>/dev/null
+output=$("$HOTSWAP" swap primary 2>&1) || true
+assert_contains "swapped back to primary" "primary" "$output"
+
+env_content=$(cat "${MOCK_HOTSWAP}/active-env.sh")
+assert_contains "swap-away unsets CLAUDE_CODE_OAUTH_TOKEN" "unset CLAUDE_CODE_OAUTH_TOKEN" "$env_content"
+test_count=$((test_count + 1))
+if echo "$env_content" | grep -q "export CLAUDE_CODE_OAUTH_TOKEN="; then
+  echo -e "  ${RED}FAIL${NC} stale token export leaked after swap-away"
+  fail_count=$((fail_count + 1))
+else
+  echo -e "  ${GREEN}PASS${NC} no stale token export after swap-away"
+  pass_count=$((pass_count + 1))
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 33: Hook AUTO_SWAP pre-arms the swap (no wrapper)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 33: Hook Auto-Swap (CLAUDE_HOTSWAP_AUTO)${NC}"
+
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0 | del(.lastLimitedSession)' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+# Fresh rate-limited transcript for the auto-swap path
+AUTO_SESSION="cafe1234-5678-9abc-def0-111122223333"
+AUTO_JSONL="${MOCK_PROJECTS}/${AUTO_SESSION}.jsonl"
+cat > "$AUTO_JSONL" <<'JSONL'
+{"type":"system","cwd":"/Users/test/projects/demo","sessionId":"cafe1234-5678-9abc-def0-111122223333"}
+{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"You've hit your usage limit · resets 9pm"}]}}
+JSONL
+
+# Capture the notify "ping" via a custom notifier command
+NOTIFY_LOG="${TEST_DIR}/notify.log"
+cat > "${MOCK_BIN}/notify-capture" <<MOCK
+#!/usr/bin/env bash
+echo "PING: \$1" >> "${NOTIFY_LOG}"
+MOCK
+chmod +x "${MOCK_BIN}/notify-capture"
+
+hook_input='{"transcript_path":"'"$AUTO_JSONL"'","session_id":"'"$AUTO_SESSION"'","cwd":"/Users/test/projects/demo","stop_hook_active":false}'
+output=$(echo "$hook_input" | CLAUDE_HOTSWAP_AUTO=1 CLAUDE_HOTSWAP_NOTIFY_CMD="${MOCK_BIN}/notify-capture" "$HOOK_SCRIPT" 2>&1) || true
+
+assert_contains "auto-swap hook reports it swapped" "Auto-swapped" "$output"
+assert_contains "auto-swap hook points to claude-hotswap resume" "claude-hotswap resume" "$output"
+
+# The swap should have actually happened: current is no longer primary
+output=$("$HOTSWAP" current 2>&1) || true
+test_count=$((test_count + 1))
+if echo "$output" | grep -q "primary"; then
+  echo -e "  ${RED}FAIL${NC} auto-swap hook did not move off primary"
+  fail_count=$((fail_count + 1))
+else
+  echo -e "  ${GREEN}PASS${NC} auto-swap hook moved off primary"
+  pass_count=$((pass_count + 1))
+fi
+
+# active-env.sh armed for the next launch
+test_count=$((test_count + 1))
+if [[ -f "${MOCK_HOTSWAP}/active-env.sh" ]]; then
+  echo -e "  ${GREEN}PASS${NC} auto-swap armed active-env.sh"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} auto-swap did not arm active-env.sh"
+  fail_count=$((fail_count + 1))
+fi
+
+# lastLimitedSession saved so `claude-hotswap resume` works wrapper-free
+saved=$(jq -r '.lastLimitedSession.id // empty' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "auto-swap saved session for resume" "$AUTO_SESSION" "$saved"
+
+# The notifier "ping" fired
+test_count=$((test_count + 1))
+if [[ -f "$NOTIFY_LOG" ]] && grep -q "PING:" "$NOTIFY_LOG"; then
+  echo -e "  ${GREEN}PASS${NC} notifier ping fired"
+  pass_count=$((pass_count + 1))
+else
+  echo -e "  ${RED}FAIL${NC} notifier ping did not fire"
+  fail_count=$((fail_count + 1))
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 34: Hook WITHOUT auto-swap only suggests (default)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 34: Hook Default (Suggest-Only)${NC}"
+
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+
+before_current=$("$HOTSWAP" current 2>&1)
+
+hook_input='{"transcript_path":"'"$AUTO_JSONL"'","session_id":"'"$AUTO_SESSION"'","cwd":"/Users/test/projects/demo","stop_hook_active":false}'
+output=$(echo "$hook_input" | "$HOOK_SCRIPT" 2>&1) || true
+
+assert_contains "default hook suggests claude-hotswap auto" "claude-hotswap auto --resume" "$output"
+
+# Without AUTO, current must NOT change (suggest-only, no side effect on .current)
+after_current=$("$HOTSWAP" current 2>&1)
+assert_eq "default hook did not swap current" "$before_current" "$after_current"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 35: CLAUDE_HOTSWAP_DISABLE escape hatch
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 35: Hook Disable Hatch${NC}"
+
+"$HOTSWAP" reset &>/dev/null
+jq '.current = 0' "${MOCK_HOTSWAP}/keys.json" > "${MOCK_HOTSWAP}/keys.json.tmp" \
+  && mv "${MOCK_HOTSWAP}/keys.json.tmp" "${MOCK_HOTSWAP}/keys.json"
+before_current=$("$HOTSWAP" current 2>&1)
+
+hook_input='{"transcript_path":"'"$AUTO_JSONL"'","session_id":"'"$AUTO_SESSION"'","cwd":"/x","stop_hook_active":false}'
+# Even with AUTO on, DISABLE must make the hook a no-op (host owns swapping).
+output=$(echo "$hook_input" | CLAUDE_HOTSWAP_AUTO=1 CLAUDE_HOTSWAP_DISABLE=1 "$HOOK_SCRIPT" 2>&1) || true
+
+assert_eq "disabled hook produces no output" "" "$output"
+after_current=$("$HOTSWAP" current 2>&1)
+assert_eq "disabled hook did not swap" "$before_current" "$after_current"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
+# TEST 36: reset --due (timer-safe selective reset)
+# ─────────────────────────────────────────────────────
+
+echo -e "${BOLD}Test 36: reset --due${NC}"
+
+# Craft keys: one whose window has passed, one still ahead, one unknown+old.
+read EXDUE RDUE EXAH RAH EXOLD < <(python3 -c "
+import datetime
+loc=datetime.datetime.now().astimezone()
+exd=(loc-datetime.timedelta(hours=6)).replace(minute=0,second=0,microsecond=0)
+rd=(exd+datetime.timedelta(hours=2)).strftime('%-I%p').lower()
+exa=(loc-datetime.timedelta(hours=1)).replace(minute=0,second=0,microsecond=0)
+ra=(exa+datetime.timedelta(hours=3)).strftime('%-I%p').lower()
+exo=(loc-datetime.timedelta(hours=6))
+U=datetime.timezone.utc
+print(exd.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'), rd,
+      exa.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'), ra,
+      exo.astimezone(U).strftime('%Y-%m-%dT%H:%M:%SZ'))
+")
+cat > "${MOCK_HOTSWAP}/keys.json" <<JSON
+{ "keys": [
+  {"name":"primary","type":"subscription","active":true,"exhausted":false,"exhaustedAt":null,"resetsAt":null},
+  {"name":"kdue","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXDUE","resetsAt":"$RDUE"},
+  {"name":"kahead","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXAH","resetsAt":"$RAH"},
+  {"name":"kold","type":"oauth_token","active":true,"exhausted":true,"exhaustedAt":"$EXOLD","resetsAt":"unknown"}
+], "current":0 }
+JSON
+
+output=$("$HOTSWAP" reset --due 2>&1) || true
+assert_contains "reset --due names the due key" "kdue" "$output"
+
+kdue_ex=$(jq -r '.keys[] | select(.name=="kdue") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+kahead_ex=$(jq -r '.keys[] | select(.name=="kahead") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+kold_ex=$(jq -r '.keys[] | select(.name=="kold") | .exhausted' "${MOCK_HOTSWAP}/keys.json")
+assert_eq "passed-window key cleared" "false" "$kdue_ex"
+assert_eq "future-window key kept" "true" "$kahead_ex"
+assert_eq "old unknown key cleared (5h15m fallback)" "false" "$kold_ex"
+
+# Idempotent: nothing due now (kahead still ahead)
+output=$("$HOTSWAP" reset --due 2>&1) || true
+assert_contains "second run reports nothing due" "No keys due" "$output"
+
+echo ""
+
+# ─────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────
 
